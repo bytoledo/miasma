@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SEIRD-Parallel | Motor Epidemiológico CUDA</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot-live"></span>
+      <h1>SEIRD-Parallel <span>CUDA HPC</span></h1>
+    </div>
+    <div class="status-pills">
+      <div class="pill">Día: <strong id="valDay">0.0</strong></div>
+      <div class="pill">GPU Step: <strong id="valStepMs">0.0</strong> ms</div>
+      <div class="pill">R<sub>t</sub>: <strong id="valRt">0.00</strong></div>
+      <div class="pill">Z-score Max: <strong id="valZ">0.00</strong></div>
+      <div class="pill">Hotspots: <strong id="valHotspots">0</strong></div>
+      <div class="pill alert-pill" id="alertBadge">NORMAL</div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="viewport-panel">
+      <div class="canvas-wrap">
+        <canvas id="simCanvas" width="1920" height="1080"></canvas>
+      </div>
+      <div class="legend">
+        <span><i class="swatch s"></i> Susceptible (S)</span>
+        <span><i class="swatch e"></i> Expuesto (E)</span>
+        <span><i class="swatch i"></i> Infectado (I)</span>
+        <span><i class="swatch r"></i> Recuperado (R)</span>
+        <span><i class="swatch d"></i> Fallecido (D)</span>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="card">
+        <h2>Población (500k Agentes)</h2>
+        <div class="kpi-grid">
+          <div class="kpi s"><span>S</span><strong id="cntS">0</strong></div>
+          <div class="kpi e"><span>E</span><strong id="cntE">0</strong></div>
+          <div class="kpi i"><span>I</span><strong id="cntI">0</strong></div>
+          <div class="kpi r"><span>R</span><strong id="cntR">0</strong></div>
+          <div class="kpi d"><span>D</span><strong id="cntD">0</strong></div>
+          <div class="kpi cfr"><span>CFR</span><strong id="valCfr">0.0%</strong></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Curva Epidemiológica</h2>
+        <canvas id="chartCanvas" width="380" height="160"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Controles de Simulación</h2>
+        <div class="btn-row">
+          <button id="btnPause" class="btn primary">Pausar</button>
+          <button id="btnReset" class="btn danger">Reiniciar</button>
+        </div>
+
+        <div class="presets">
+          <button id="btnQuarantine" class="btn small">Cuarentena Estricta</button>
+          <button id="btnVaccine" class="btn small">Campaña Vacunación</button>
+          <button id="btnNormal" class="btn small">Sin Restricciones</button>
+        </div>
+
+        <div class="slider-group">
+          <label>Movilidad / Cuarentena <span id="lblQuarantine">1.00</span></label>
+          <input id="rngQuarantine" type="range" min="0.05" max="1.50" step="0.05" value="1.00" />
+        </div>
+
+        <div class="slider-group">
+          <label>Tasa de Contagio (&beta;) <span id="lblBeta">0.25</span></label>
+          <input id="rngBeta" type="range" min="0.01" max="1.00" step="0.01" value="0.25" />
+        </div>
+
+        <div class="slider-group">
+          <label>Letalidad (&alpha;) <span id="lblFatality">0.02</span></label>
+          <input id="rngFatality" type="range" min="0.00" max="0.30" step="0.005" value="0.02" />
+        </div>
+
+        <div class="slider-group">
+          <label>Radio de Contagio <span id="lblRadius">3.5</span></label>
+          <input id="rngRadius" type="range" min="1.0" max="7.0" step="0.25" value="3.5" />
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
