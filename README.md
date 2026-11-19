@@ -33,13 +33,13 @@ graph TD
     subgraph GPU ["GPU: NVIDIA CUDA (SoA + Spatial Hashing)"]
         MoveHash[kernel_move_and_hash: Lagrangian Mobility & Cell ID] --> RadixSort[cub::DeviceRadixSort::SortPairs]
         RadixSort --> Reorder[kernel_reorder_agents + Cell Bounds]
-        Reorder --> SEIRStep[kernel_seir_step: O(N) Contagion + Stateless RNG]
+        Reorder --> SEIRStep["kernel_seir_step: O(N) Contagion + Stateless RNG"]
         SEIRStep --> Render1080p[kernel_render_1080p: RGBA Framebuffer]
-        SEIRStep --> Counters[Atomic Reduction S/E/I/R/D & new_exposures]
+        SEIRStep --> Counters["Atomic Reduction S/E/I/R/D & new_exposures"]
     end
 
     subgraph CPU ["CPU: OpenMP & AVX2 (Telemetry & Validation)"]
-        Counters -->|Pinned Memory / Stream| CpuEngine[CpuEngine & CpuEnsembleEngine]
+        Counters -->|Pinned Memory / Stream| CpuEngine["CpuEngine & CpuEnsembleEngine"]
         CpuEngine --> RtBoot[Bootstrap Rt & Spatial Z-Score]
         CpuEngine --> ODERK4[SEIRDS RK4 ODE Solver + NGM R0]
         CpuEngine --> Percentiles[Monte Carlo Percentiles P5 / P50 / P95]
