@@ -18,6 +18,7 @@
 #include "types.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -27,7 +28,17 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
+
+#ifdef _WIN32
+// Solicitar a NVIDIA Optimus usar la GPU dedicada para el contexto OpenGL/CUDA
+extern "C" {
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+}
+#endif
 
 namespace {
 
@@ -55,11 +66,17 @@ enum ControlId : int {
 struct HistoryPoint {
     float day;
     float s, e, i, r, d;
+    float ode_i;
+    float i_p05, i_p50, i_p95;
 };
 
-bool   g_running         = true;
-bool   g_paused          = false; // Se define desde el Launcher al iniciar
-bool   g_reset_requested = false;
+std::atomic<bool> g_running{true};
+std::atomic<bool> g_paused{false}; // Se define desde el Launcher al iniciar
+std::atomic<bool> g_reset_requested{false};
+std::atomic<bool> g_force_render{false};
+std::atomic<bool> g_export_requested{false};
+
+std::mutex g_state_mtx;
 int    g_substeps         = 4;    // 4 * 0.05 = 0.20 días/frame
 int    g_chart_days       = 30;   // Ventana de días en la gráfica inferior
 int    g_initial_infected = 150;  // Casos iniciales al iniciar/reiniciar
@@ -67,8 +84,6 @@ float  g_chart_scroll_day = 0.0f; // Día inicial visible al deslizar la gráfic
 bool   g_chart_autofollow = true; // Sigue automáticamente el último día
 bool   g_dragging_chart   = false;
 bool   g_dragging_map     = false;
-bool   g_force_render     = false;
-bool   g_export_requested = false;
 int    g_drag_last_x      = 0;
 int    g_drag_last_y      = 0;
 int    g_win_w            = 1440;
@@ -252,14 +267,14 @@ void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
     sync_sliders_from_params();
 }
 
-void clamp_camera() {
-    g_params.cam_zoom = std::clamp(g_params.cam_zoom, 1.0f, 20.0f);
-    float vw = g_params.world_width  / g_params.cam_zoom;
-    float vh = g_params.world_height / g_params.cam_zoom;
+void clamp_camera_locked(seird::SimParams& params) {
+    params.cam_zoom = std::clamp(params.cam_zoom, 1.0f, 20.0f);
+    float vw = params.world_width  / params.cam_zoom;
+    float vh = params.world_height / params.cam_zoom;
     float half_w = 0.5f * vw;
     float half_h = 0.5f * vh;
-    g_params.cam_cx = std::clamp(g_params.cam_cx, half_w, g_params.world_width  - half_w);
-    g_params.cam_cy = std::clamp(g_params.cam_cy, half_h, g_params.world_height - half_h);
+    params.cam_cx = std::clamp(params.cam_cx, half_w, params.world_width  - half_w);
+    params.cam_cy = std::clamp(params.cam_cy, half_h, params.world_height - half_h);
 }
 
 LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -273,11 +288,16 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             RECT rc{};
             GetClientRect(hwnd, &rc);
             int chart_top_px = static_cast<int>(static_cast<float>(rc.bottom) * 0.78f);
+            float zoom = 1.0f;
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                zoom = g_params.cam_zoom;
+            }
             if (my >= chart_top_px) {
                 g_dragging_chart = true;
                 g_drag_last_x    = mx;
                 SetCapture(hwnd);
-            } else if (g_params.cam_zoom > 1.01f) {
+            } else if (zoom > 1.01f) {
                 g_dragging_map = true;
                 g_drag_last_x  = mx;
                 g_drag_last_y  = my;
@@ -286,10 +306,13 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         case WM_RBUTTONDOWN: {
-            g_params.cam_zoom = 1.0f;
-            g_params.cam_cx   = 0.5f * g_params.world_width;
-            g_params.cam_cy   = 0.5f * g_params.world_height;
-            g_force_render    = true;
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                g_params.cam_zoom = 1.0f;
+                g_params.cam_cx   = 0.5f * g_params.world_width;
+                g_params.cam_cy   = 0.5f * g_params.world_height;
+            }
+            g_force_render.store(true);
             return 0;
         }
         case WM_MOUSEMOVE: {
@@ -314,12 +337,15 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 GetClientRect(hwnd, &rc);
                 float gl_w = static_cast<float>(std::max(1L, rc.right));
                 float sim_h = static_cast<float>(std::max(1L, rc.bottom)) * 0.78f;
-                float vw = g_params.world_width  / g_params.cam_zoom;
-                float vh = g_params.world_height / g_params.cam_zoom;
-                g_params.cam_cx -= (static_cast<float>(dx) / gl_w)  * vw;
-                g_params.cam_cy -= (static_cast<float>(dy) / sim_h) * vh;
-                clamp_camera();
-                g_force_render = true;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    float vw = g_params.world_width  / g_params.cam_zoom;
+                    float vh = g_params.world_height / g_params.cam_zoom;
+                    g_params.cam_cx -= (static_cast<float>(dx) / gl_w)  * vw;
+                    g_params.cam_cy -= (static_cast<float>(dy) / sim_h) * vh;
+                    clamp_camera_locked(g_params);
+                }
+                g_force_render.store(true);
             }
             return 0;
         }
@@ -353,20 +379,23 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 float u = std::clamp(static_cast<float>(pt.x) / gl_w,  0.0f, 1.0f);
                 float v = std::clamp(static_cast<float>(pt.y) / sim_h, 0.0f, 1.0f);
 
-                float old_vw = g_params.world_width  / g_params.cam_zoom;
-                float old_vh = g_params.world_height / g_params.cam_zoom;
-                float wx = (g_params.cam_cx - 0.5f * old_vw) + u * old_vw;
-                float wy = (g_params.cam_cy - 0.5f * old_vh) + v * old_vh;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    float old_vw = g_params.world_width  / g_params.cam_zoom;
+                    float old_vh = g_params.world_height / g_params.cam_zoom;
+                    float wx = (g_params.cam_cx - 0.5f * old_vw) + u * old_vw;
+                    float wy = (g_params.cam_cy - 0.5f * old_vh) + v * old_vh;
 
-                float factor = (delta > 0) ? 1.20f : (1.0f / 1.20f);
-                g_params.cam_zoom = std::clamp(g_params.cam_zoom * factor, 1.0f, 20.0f);
+                    float factor = (delta > 0) ? 1.20f : (1.0f / 1.20f);
+                    g_params.cam_zoom = std::clamp(g_params.cam_zoom * factor, 1.0f, 20.0f);
 
-                float new_vw = g_params.world_width  / g_params.cam_zoom;
-                float new_vh = g_params.world_height / g_params.cam_zoom;
-                g_params.cam_cx = wx - (u - 0.5f) * new_vw;
-                g_params.cam_cy = wy - (v - 0.5f) * new_vh;
-                clamp_camera();
-                g_force_render = true;
+                    float new_vw = g_params.world_width  / g_params.cam_zoom;
+                    float new_vh = g_params.world_height / g_params.cam_zoom;
+                    g_params.cam_cx = wx - (u - 0.5f) * new_vw;
+                    g_params.cam_cy = wy - (v - 0.5f) * new_vh;
+                    clamp_camera_locked(g_params);
+                }
+                g_force_render.store(true);
             }
             return 0;
         }
@@ -379,7 +408,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CLOSE:
         case WM_DESTROY:
-            g_running = false;
+            g_running.store(false);
             PostQuitMessage(0);
             return 0;
         case WM_SIZE:
@@ -390,54 +419,79 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             if (id == ID_BTN_PAUSE) {
-                g_paused = !g_paused;
-                SetWindowTextA(g_btn_pause, g_paused ? "Reanudar [SPACE]" : "Pausar [SPACE]");
+                bool p = !g_paused.load();
+                g_paused.store(p);
+                SetWindowTextA(g_btn_pause, p ? "Reanudar [SPACE]" : "Pausar [SPACE]");
             } else if (id == ID_BTN_RESET) {
-                g_reset_requested = true;
+                g_reset_requested.store(true);
             } else if (id == ID_BTN_QUARANTINE) {
-                g_params.quarantine_factor = 0.10f;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.quarantine_factor = 0.10f;
+                }
                 sync_sliders_from_params();
             } else if (id == ID_BTN_VACCINE) {
-                g_params.beta = 0.06f;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.beta = 0.06f;
+                    g_params.vaccination_rate = 0.02f;
+                }
                 sync_sliders_from_params();
             } else if (id == ID_BTN_NORMAL) {
-                g_params.quarantine_factor = 1.00f;
-                g_params.beta              = 0.25f;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.quarantine_factor = 1.00f;
+                    g_params.beta              = 0.25f;
+                    g_params.vaccination_rate  = 0.0f;
+                    g_params.focal_quarantine  = false;
+                }
                 sync_sliders_from_params();
             } else if (id == ID_BTN_RENDER_MODE) {
-                g_params.render_mode = (g_params.render_mode + 1) % 3;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.render_mode = (g_params.render_mode + 1) % 3;
+                }
                 update_visual_buttons();
-                g_force_render = true;
+                g_force_render.store(true);
             } else if (id == ID_BTN_TRAILS) {
-                g_params.enable_trails = !g_params.enable_trails;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.enable_trails = !g_params.enable_trails;
+                }
                 update_visual_buttons();
-                g_force_render = true;
+                g_force_render.store(true);
             } else if (id == ID_BTN_EXPORT) {
-                g_export_requested = true;
+                g_export_requested.store(true);
             } else if (id == ID_BTN_RINGS) {
-                g_params.show_rings = !g_params.show_rings;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.show_rings = !g_params.show_rings;
+                }
                 update_visual_buttons();
-                g_force_render = true;
+                g_force_render.store(true);
             }
             SetFocus(hwnd);
             return 0;
         }
         case WM_HSCROLL: {
             HWND src = reinterpret_cast<HWND>(lParam);
-            if (src == g_trk_quarantine) {
-                g_params.quarantine_factor = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 100.0f;
-            } else if (src == g_trk_beta) {
-                g_params.beta = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 100.0f;
-            } else if (src == g_trk_fatality) {
-                g_params.fatality_rate = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 1000.0f;
-            } else if (src == g_trk_radius) {
-                g_params.infection_radius = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 10.0f;
-            } else if (src == g_trk_substeps) {
-                g_substeps = static_cast<int>(SendMessageA(src, TBM_GETPOS, 0, 0));
-            } else if (src == g_trk_chart_days) {
-                g_chart_days = static_cast<int>(SendMessageA(src, TBM_GETPOS, 0, 0));
-            } else if (src == g_trk_init_inf) {
-                g_initial_infected = static_cast<int>(SendMessageA(src, TBM_GETPOS, 0, 0));
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                if (src == g_trk_quarantine) {
+                    g_params.quarantine_factor = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 100.0f;
+                } else if (src == g_trk_beta) {
+                    g_params.beta = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 100.0f;
+                } else if (src == g_trk_fatality) {
+                    g_params.fatality_rate = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 1000.0f;
+                } else if (src == g_trk_radius) {
+                    g_params.infection_radius = static_cast<float>(SendMessageA(src, TBM_GETPOS, 0, 0)) / 10.0f;
+                } else if (src == g_trk_substeps) {
+                    g_substeps = static_cast<int>(SendMessageA(src, TBM_GETPOS, 0, 0));
+                } else if (src == g_trk_chart_days) {
+                    g_chart_days = static_cast<int>(SendMessageA(src, TBM_GETPOS, 0, 0));
+                } else if (src == g_trk_init_inf) {
+                    g_initial_infected = static_cast<int>(SendMessageA(src, TBM_GETPOS, 0, 0));
+                }
             }
             update_slider_labels();
             return 0;
@@ -487,58 +541,96 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_KEYDOWN:
             switch (wParam) {
                 case VK_ESCAPE:
-                    g_running = false;
+                    g_running.store(false);
                     PostQuitMessage(0);
                     break;
-                case VK_SPACE:
-                    g_paused = !g_paused;
-                    if (g_btn_pause) SetWindowTextA(g_btn_pause, g_paused ? "Reanudar [SPACE]" : "Pausar [SPACE]");
+                case VK_SPACE: {
+                    bool p = !g_paused.load();
+                    g_paused.store(p);
+                    if (g_btn_pause) SetWindowTextA(g_btn_pause, p ? "Reanudar [SPACE]" : "Pausar [SPACE]");
                     break;
+                }
                 case 'R':
-                    g_reset_requested = true;
+                    g_reset_requested.store(true);
                     break;
                 case 'Q':
-                    g_params.quarantine_factor = (g_params.quarantine_factor < 0.5f) ? 1.00f : 0.10f;
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.quarantine_factor = (g_params.quarantine_factor < 0.5f) ? 1.00f : 0.10f;
+                    }
                     sync_sliders_from_params();
                     break;
                 case 'V':
-                    g_params.beta = (g_params.beta < 0.12f) ? 0.25f : 0.06f;
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        if (g_params.beta < 0.12f) {
+                            g_params.beta = 0.25f;
+                            g_params.vaccination_rate = 0.0f;
+                        } else {
+                            g_params.beta = 0.06f;
+                            g_params.vaccination_rate = 0.02f;
+                        }
+                    }
                     sync_sliders_from_params();
                     break;
                 case 'M':
-                    g_params.render_mode = (g_params.render_mode + 1) % 3;
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.render_mode = (g_params.render_mode + 1) % 3;
+                    }
                     update_visual_buttons();
-                    g_force_render = true;
+                    g_force_render.store(true);
                     break;
                 case 'T':
-                    g_params.enable_trails = !g_params.enable_trails;
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.enable_trails = !g_params.enable_trails;
+                    }
                     update_visual_buttons();
-                    g_force_render = true;
+                    g_force_render.store(true);
                     break;
                 case 'C':
-                    g_params.cam_zoom = 1.0f;
-                    g_params.cam_cx   = 0.5f * g_params.world_width;
-                    g_params.cam_cy   = 0.5f * g_params.world_height;
-                    g_force_render    = true;
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.cam_zoom = 1.0f;
+                        g_params.cam_cx   = 0.5f * g_params.world_width;
+                        g_params.cam_cy   = 0.5f * g_params.world_height;
+                    }
+                    g_force_render.store(true);
                     break;
                 case 'E':
-                    g_export_requested = true;
+                    g_export_requested.store(true);
                     break;
                 case 'A':
-                    g_params.show_rings = !g_params.show_rings;
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.show_rings = !g_params.show_rings;
+                    }
                     update_visual_buttons();
-                    g_force_render = true;
+                    g_force_render.store(true);
+                    break;
+                case 'F':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.focal_quarantine = !g_params.focal_quarantine;
+                    }
                     break;
                 case VK_UP:
                 case VK_OEM_PLUS:
                 case VK_ADD:
-                    g_substeps = std::min(48, g_substeps + 1);
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_substeps = std::min(48, g_substeps + 1);
+                    }
                     sync_sliders_from_params();
                     break;
                 case VK_DOWN:
                 case VK_OEM_MINUS:
                 case VK_SUBTRACT:
-                    g_substeps = std::max(1, g_substeps - 1);
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_substeps = std::max(1, g_substeps - 1);
+                    }
                     sync_sliders_from_params();
                     break;
             }
@@ -557,7 +649,12 @@ void draw_gl_text(float x, float y, const char* text) {
     glPopAttrib();
 }
 
-void draw_epidemic_curve_overlay(const std::deque<HistoryPoint>& hist, float current_day, int chart_days) {
+void draw_epidemic_curve_overlay(
+    const std::deque<HistoryPoint>& hist,
+    float current_day,
+    int chart_days,
+    int num_replicas
+) {
     // Panel acoplado en el 22% inferior (ancho completo, sin tapar la simulación)
     const float x0 = -1.00f, x1 = 1.00f;
     const float y0 = -1.00f, y1 = -0.56f;
@@ -639,19 +736,38 @@ void draw_epidemic_curve_overlay(const std::deque<HistoryPoint>& hist, float cur
         draw_gl_text(vx - 0.012f, y0 + 0.022f, lbl);
     }
 
-    char header[128];
+    char header[180];
     std::snprintf(
         header, sizeof(header),
-        "Curva SEIRD [%.1fd - %.1fd]  (%s)",
+        "Curva SEIRD [%.1fd - %.1fd]  (%s | Punteada: I_ODE%s)",
         t_min, t_max,
-        g_chart_autofollow ? "Auto-seguir | Arrastra o rueda para deslizar" : "Deslizado manual | Rueda abajo para volver"
+        g_chart_autofollow ? "Auto-seguir | Arrastra o rueda" : "Deslizado manual | Rueda abajo",
+        (num_replicas > 1) ? " | Banda P5-P95" : ""
     );
     draw_gl_text(px0, y1 - 0.042f, header);
 
     if (hist.size() >= 2) {
-        auto draw_series = [&](auto getter, float r, float g, float b) {
+        if (num_replicas > 1) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glColor4f(0.94f, 0.27f, 0.27f, 0.24f);
+            glBegin(GL_QUAD_STRIP);
+            for (const auto& pt : hist) {
+                if (pt.day < t_min - 0.5f || pt.day > t_max + 0.5f) continue;
+                float u  = std::clamp((pt.day - t_min) / span, 0.0f, 1.0f);
+                float vx = px0 + u * (px1 - px0);
+                float y_lo = py0 + std::clamp(pt.i_p05, 0.0f, 1.0f) * (py1 - py0);
+                float y_hi = py0 + std::clamp(pt.i_p95, 0.0f, 1.0f) * (py1 - py0);
+                glVertex2f(vx, y_lo);
+                glVertex2f(vx, y_hi);
+            }
+            glEnd();
+            glDisable(GL_BLEND);
+        }
+
+        auto draw_series = [&](auto getter, float r, float g, float b, float lw = 2.0f) {
             glColor3f(r, g, b);
-            glLineWidth(2.0f);
+            glLineWidth(lw);
             glBegin(GL_LINE_STRIP);
             for (const auto& pt : hist) {
                 if (pt.day < t_min - 0.5f || pt.day > t_max + 0.5f) continue;
@@ -666,16 +782,29 @@ void draw_epidemic_curve_overlay(const std::deque<HistoryPoint>& hist, float cur
         draw_series([](const HistoryPoint& p) { return p.s; }, 0.22f, 0.74f, 0.97f);
         draw_series([](const HistoryPoint& p) { return p.e; }, 0.98f, 0.80f, 0.08f);
         draw_series([](const HistoryPoint& p) { return p.i; }, 0.94f, 0.27f, 0.27f);
+        if (num_replicas > 1) {
+            draw_series([](const HistoryPoint& p) { return p.i_p50; }, 1.00f, 0.55f, 0.35f, 2.0f);
+        }
         draw_series([](const HistoryPoint& p) { return p.r; }, 0.13f, 0.77f, 0.37f);
         draw_series([](const HistoryPoint& p) { return p.d; }, 0.39f, 0.45f, 0.55f);
+
+        glEnable(GL_LINE_STIPPLE);
+        glLineStipple(2, 0xAAAA);
+        draw_series([](const HistoryPoint& p) { return p.ode_i; }, 0.95f, 0.72f, 0.90f, 1.5f);
+        glDisable(GL_LINE_STIPPLE);
     }
 }
 
 void export_simulation_report(
     HWND owner,
-    const seird::CpuTelemetryEngine& telemetry,
+    const std::vector<seird::TelemetryMetrics>& hist,
+    const std::vector<seird::EnsembleMetrics>& ens_hist,
+    const seird::EnsembleMetrics& current_ens,
     const seird::SimStats& current_stats,
+    const seird::SimParams& params,
+    uint64_t seed,
     int num_agents,
+    int initial_infected,
     double last_gpu_ms
 ) {
     std::error_code ec;
@@ -685,16 +814,18 @@ void export_simulation_report(
     std::tm tm_now{};
     localtime_s(&tm_now, &now_t);
 
-    char fname[128];
-    std::strftime(fname, sizeof(fname), "reports/seird_reporte_%Y%m%d_%H%M%S.csv", &tm_now);
+    char csv_name[128];
+    char json_name[128];
+    std::strftime(csv_name,  sizeof(csv_name),  "reports/seird_reporte_%Y%m%d_%H%M%S.csv",  &tm_now);
+    std::strftime(json_name, sizeof(json_name), "reports/seird_reporte_%Y%m%d_%H%M%S.json", &tm_now);
 
-    std::ofstream out(fname);
+    std::ofstream out(csv_name);
     if (!out.is_open()) {
         MessageBoxA(owner, "No se pudo crear el archivo CSV en reports/.", "Error al exportar", MB_OK | MB_ICONERROR);
         return;
     }
 
-    out << "dia,susceptibles,expuestos,infectados,recuperados,fallecidos,rt,nuevos_casos_dia,cfr_pct,focos_brote,pico_z\n";
+    out << "dia,susceptibles,expuestos,infectados,recuperados,fallecidos,rt,rt_p05,rt_p95,prob_rt_gt_1,r0_ngm,nuevos_casos_dia,cfr_pct,focos_brote,pico_z,i_p05_pct,i_p50_pct,i_p95_pct,extincion_pct\n";
 
     uint32_t peak_i = current_stats.count_i;
     float    peak_i_day = current_stats.sim_day;
@@ -702,8 +833,13 @@ void export_simulation_report(
     float    peak_rt = 0.0f;
     float    peak_rt_day = 0.0f;
 
-    const auto& hist = telemetry.history();
-    for (const auto& m : hist) {
+    for (std::size_t idx = 0; idx < hist.size(); ++idx) {
+        const auto& m = hist[idx];
+        const float i05 = (idx < ens_hist.size()) ? (ens_hist[idx].i_p05 * 100.0f) : 0.0f;
+        const float i50 = (idx < ens_hist.size()) ? (ens_hist[idx].i_p50 * 100.0f) : 0.0f;
+        const float i95 = (idx < ens_hist.size()) ? (ens_hist[idx].i_p95 * 100.0f) : 0.0f;
+        const float ext = (idx < ens_hist.size()) ? ens_hist[idx].extinction_pct : 0.0f;
+
         out << m.stats.sim_day << ","
             << m.stats.count_s << ","
             << m.stats.count_e << ","
@@ -711,10 +847,18 @@ void export_simulation_report(
             << m.stats.count_r << ","
             << m.stats.count_d << ","
             << m.rt << ","
+            << m.rt_p05 << ","
+            << m.rt_p95 << ","
+            << m.prob_rt_gt_1 << ","
+            << m.r0_ngm << ","
             << m.new_cases_rate << ","
             << (m.cfr * 100.0f) << ","
             << m.stats.hotspot_cells << ","
-            << m.stats.max_cell_z << "\n";
+            << m.stats.max_cell_z << ","
+            << i05 << ","
+            << i50 << ","
+            << i95 << ","
+            << ext << "\n";
 
         if (m.stats.count_i > peak_i) {
             peak_i = m.stats.count_i;
@@ -736,12 +880,78 @@ void export_simulation_report(
     uint64_t resolved       = static_cast<uint64_t>(current_stats.count_r) + static_cast<uint64_t>(current_stats.count_d);
     double   cfr_pct        = (resolved > 0) ? (100.0 * static_cast<double>(current_stats.count_d) / static_cast<double>(resolved)) : 0.0;
 
-    char summary[768];
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
+        std::snprintf(prop.name, sizeof(prop.name), "CUDA GPU");
+    }
+
+    std::ofstream jout(json_name);
+    if (jout.is_open()) {
+        jout << "{\n"
+             << "  \"gpu_name\": \"" << prop.name << "\",\n"
+             << "  \"gpu_sm\": \"" << prop.major << "." << prop.minor << "\",\n"
+             << "  \"seed\": " << seed << ",\n"
+             << "  \"num_agents\": " << num_agents << ",\n"
+             << "  \"initial_infected\": " << initial_infected << ",\n"
+             << "  \"csv_file\": \"" << csv_name << "\",\n"
+             << "  \"params\": {\n"
+             << "    \"world_width\": " << params.world_width << ",\n"
+             << "    \"world_height\": " << params.world_height << ",\n"
+             << "    \"grid_w\": " << params.grid_w << ",\n"
+             << "    \"grid_h\": " << params.grid_h << ",\n"
+             << "    \"cell_size\": " << params.cell_size << ",\n"
+             << "    \"infection_radius\": " << params.infection_radius << ",\n"
+             << "    \"beta\": " << params.beta << ",\n"
+             << "    \"incubation_days\": " << params.incubation_days << ",\n"
+             << "    \"infectious_days\": " << params.infectious_days << ",\n"
+             << "    \"fatality_rate\": " << params.fatality_rate << ",\n"
+             << "    \"dt\": " << params.dt << ",\n"
+             << "    \"base_speed\": " << params.base_speed << ",\n"
+             << "    \"quarantine_factor\": " << params.quarantine_factor << ",\n"
+             << "    \"urban_clustering\": " << params.urban_clustering << ",\n"
+             << "    \"focal_quarantine\": " << (params.focal_quarantine ? "true" : "false") << ",\n"
+             << "    \"hospital_capacity_pct\": " << params.hospital_capacity_pct << ",\n"
+             << "    \"vaccination_rate\": " << params.vaccination_rate << ",\n"
+             << "    \"immunity_days\": " << params.immunity_days << ",\n"
+             << "    \"superspreader_frac\": " << params.superspreader_frac << ",\n"
+             << "    \"superspreader_mult\": " << params.superspreader_mult << ",\n"
+             << "    \"num_replicas\": " << params.num_replicas << "\n"
+             << "  },\n"
+             << "  \"ensemble\": {\n"
+             << "    \"num_replicas\": " << params.num_replicas << ",\n"
+             << "    \"i_p05_pct\": " << (current_ens.i_p05 * 100.0f) << ",\n"
+             << "    \"i_p50_pct\": " << (current_ens.i_p50 * 100.0f) << ",\n"
+             << "    \"i_p95_pct\": " << (current_ens.i_p95 * 100.0f) << ",\n"
+             << "    \"prob_rt_gt_1\": " << current_ens.prob_rt_gt_1 << ",\n"
+             << "    \"extinction_pct\": " << current_ens.extinction_pct << "\n"
+             << "  },\n"
+             << "  \"summary\": {\n"
+             << "    \"final_day\": " << current_stats.sim_day << ",\n"
+             << "    \"samples\": " << hist.size() << ",\n"
+             << "    \"count_s\": " << current_stats.count_s << ",\n"
+             << "    \"count_e\": " << current_stats.count_e << ",\n"
+             << "    \"count_i\": " << current_stats.count_i << ",\n"
+             << "    \"count_r\": " << current_stats.count_r << ",\n"
+             << "    \"count_d\": " << current_stats.count_d << ",\n"
+             << "    \"attack_rate_pct\": " << pct_affected << ",\n"
+             << "    \"peak_i\": " << peak_i << ",\n"
+             << "    \"peak_i_day\": " << peak_i_day << ",\n"
+             << "    \"peak_e\": " << peak_e << ",\n"
+             << "    \"peak_rt\": " << peak_rt << ",\n"
+             << "    \"peak_rt_day\": " << peak_rt_day << ",\n"
+             << "    \"cfr_pct\": " << cfr_pct << ",\n"
+             << "    \"last_gpu_ms\": " << last_gpu_ms << "\n"
+             << "  }\n"
+             << "}\n";
+        jout.close();
+    }
+
+    char summary[896];
     std::snprintf(
         summary, sizeof(summary),
         "RESUMEN NUMERICO DE LA SIMULACION\n"
         "==========================================\n"
-        "Poblacion total: %d personas\n"
+        "Poblacion total: %d personas (seed=%llu)\n"
         "Dia alcanzado: %.2f dias (%zu muestras)\n\n"
         "IMPACTO EPIDEMIOLOGICO:\n"
         "- Contagiados acumulados: %u (%.2f%%)\n"
@@ -752,8 +962,8 @@ void export_simulation_report(
         "- Fallecidos totales: %u (CFR: %.2f%%)\n\n"
         "RENDIMIENTO GPU:\n"
         "- Ultimo paso GPU: %.2f ms/frame\n\n"
-        "Archivo guardado en:\n%s",
-        num_agents,
+        "Archivos guardados:\n- %s\n- %s",
+        num_agents, static_cast<unsigned long long>(seed),
         current_stats.sim_day, hist.size(),
         total_affected, pct_affected,
         peak_i, pct_peak_i, peak_i_day,
@@ -762,9 +972,9 @@ void export_simulation_report(
         current_stats.count_r,
         current_stats.count_d, cfr_pct,
         last_gpu_ms,
-        fname
+        csv_name, json_name
     );
-    MessageBoxA(owner, summary, "Reporte Exportado (CSV + Resumen)", MB_OK | MB_ICONINFORMATION);
+    MessageBoxA(owner, summary, "Reporte Exportado (CSV + JSON)", MB_OK | MB_ICONINFORMATION);
 }
 
 struct DiseasePreset {
@@ -824,6 +1034,7 @@ struct LauncherState {
     bool  done       = false;
     bool  launch     = false;
     int   agents     = 500000;
+    int   max_agents = 1500000;
     int   infected   = 150;
     int   substeps   = 4;
     int   chart_days = 30;
@@ -844,6 +1055,7 @@ struct LauncherState {
     HWND edt_substeps = nullptr;
     HWND edt_chart    = nullptr;
     HWND cmb_view     = nullptr;
+    HWND cmb_replicas = nullptr;
     HWND chk_trails   = nullptr;
     HWND chk_paused   = nullptr;
 };
@@ -905,7 +1117,7 @@ LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 int sel = static_cast<int>(SendMessageA(st->cmb_preset, CB_GETCURSEL, 0, 0));
                 apply_preset_to_launcher(st, sel);
             } else if (id == 1020) { // Lanzar simulacion
-                st->agents     = read_edit_int(st->edt_agents, 500000, 1000, 1500000);
+                st->agents     = read_edit_int(st->edt_agents, 500000, 1000, st->max_agents);
                 st->infected   = read_edit_int(st->edt_infected, 150, 1, st->agents);
                 st->params.base_speed        = read_edit_float(st->edt_speed, 15.0f, 1.0f, 100.0f);
                 st->params.quarantine_factor = read_edit_float(st->edt_quar, 1.0f, 0.05f, 1.50f);
@@ -917,30 +1129,38 @@ LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 st->substeps   = read_edit_int(st->edt_substeps, 4, 1, 48);
                 st->chart_days = read_edit_int(st->edt_chart, 30, 2, 120);
                 st->params.render_mode   = static_cast<int>(SendMessageA(st->cmb_view, CB_GETCURSEL, 0, 0));
+                const int rep_sel        = static_cast<int>(SendMessageA(st->cmb_replicas, CB_GETCURSEL, 0, 0));
+                constexpr int kRepChoices[] = { 1, 8, 16, 32 };
+                const int k_rep = (rep_sel >= 0 && rep_sel < 4) ? kRepChoices[rep_sel] : 1;
+                st->params.num_replicas  = k_rep;
+                st->agents               = std::clamp(st->agents, 1000, std::max(1000, st->max_agents / k_rep));
+                st->infected             = std::clamp(st->infected, 1, st->agents);
                 st->params.enable_trails = (SendMessageA(st->chk_trails, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 st->start_paused         = (SendMessageA(st->chk_paused, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-                // Garantizar que cell_size >= infection_radius para Spatial Hashing exacto
-                st->params.cell_size = std::max(4.0f, st->params.infection_radius + 0.5f);
-                st->params.grid_w    = static_cast<int>(std::ceil(st->params.world_width / st->params.cell_size));
-                st->params.grid_h    = static_cast<int>(std::ceil(st->params.world_height / st->params.cell_size));
+                // Garantizar cell_size >= infection_radius y escalar dominio según población
+                seird::cuda_adjust_domain_for_agents(st->params, st->agents);
 
                 st->launch = true;
                 st->done   = true;
                 DestroyWindow(hwnd);
             } else if (id == 1021) { // Benchmark GPU
-                int n_bench = read_edit_int(st->edt_agents, 500000, 10000, 1500000);
+                int n_bench = read_edit_int(st->edt_agents, 500000, 10000, st->max_agents);
+                seird::SimParams bench_params = st->params;
+                seird::cuda_adjust_domain_for_agents(bench_params, n_bench);
                 seird::BenchmarkResult res;
-                if (seird::cuda_run_benchmark(n_bench, 15, 60, st->params, res)) {
-                    char msg_buf[256];
+                if (seird::cuda_run_benchmark(n_bench, 15, 60, bench_params, res)) {
+                    cudaDeviceProp prop{};
+                    cudaGetDeviceProperties(&prop, 0);
+                    char msg_buf[320];
                     std::snprintf(
                         msg_buf, sizeof(msg_buf),
-                        "Benchmark GTX 1650 Ti (%d agentes):\n\n"
+                        "Benchmark %s (%d agentes):\n\n"
                         "- Simulacion SEIRD: %.3f ms/paso\n"
                         "- Render 1080p: %.3f ms/frame\n"
                         "- Rendimiento: %.2f M agentes/seg\n"
                         "- VRAM usada: %.0f MB",
-                        res.num_agents, res.avg_step_ms, res.avg_render_ms,
+                        prop.name, res.num_agents, res.avg_step_ms, res.avg_render_ms,
                         res.agents_per_sec / 1e6, res.vram_used_mb
                     );
                     MessageBoxA(hwnd, msg_buf, "Benchmark GPU CUDA", MB_OK | MB_ICONINFORMATION);
@@ -975,8 +1195,11 @@ bool show_launcher_dialog(
     lwc.lpszClassName = "SEIRDLauncherClass";
     RegisterClassA(&lwc);
 
+    const seird::HardwareLimits hw = seird::cuda_query_hardware_limits();
+
     LauncherState st;
-    st.agents       = num_agents;
+    st.agents       = std::min(num_agents, std::max(1000, hw.safe_agents_limit));
+    st.max_agents   = std::max(1000, hw.safe_agents_limit);
     st.infected     = initial_infected;
     st.params       = params;
     st.substeps     = substeps;
@@ -1030,7 +1253,10 @@ bool show_launcher_dialog(
     st.lbl_info = mk("STATIC", kDiseasePresets[1].info, SS_LEFT, COL_L, 62, FULL_W, 32);
 
     mk("STATIC", "2. Poblacion y Movilidad:", SS_LEFT, COL_L, 104, 240, 18);
-    st.edt_agents   = mk_edit_i("Agentes (1k - 1.5M):",    st.agents,                  COL_L, 126);
+    char agents_lbl[48];
+    std::snprintf(agents_lbl, sizeof(agents_lbl), "Agentes (1k - %.1fM):",
+                  static_cast<double>(st.max_agents) / 1e6);
+    st.edt_agents   = mk_edit_i(agents_lbl,                st.agents,                  COL_L, 126);
     st.edt_infected = mk_edit_i("Infectados iniciales:",   st.infected,                COL_R, 126);
     st.edt_speed    = mk_edit_f("Velocidad base (u/dia):", st.params.base_speed,       "%.1f", COL_L, 154);
     st.edt_quar     = mk_edit_f("Movilidad (0.05-1.50):",  st.params.quarantine_factor,"%.2f", COL_R, 154);
@@ -1052,6 +1278,14 @@ bool show_launcher_dialog(
 
     st.edt_substeps = mk_edit_i("Velocidad (1h - 24h/frame):", st.substeps,   COL_R, 334);
     st.edt_chart    = mk_edit_i("Ventana grafica (dias):",    st.chart_days, COL_L, 366);
+
+    mk("STATIC", "Replicas Monte Carlo (K):", SS_LEFT, COL_R, 369, 166, 18);
+    st.cmb_replicas = mk("COMBOBOX", "", CBS_DROPDOWNLIST, COL_R + 172, 366, 78, 120);
+    SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("1 (Normal)"));
+    SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("8"));
+    SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("16"));
+    SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("32"));
+    SendMessageA(st.cmb_replicas, CB_SETCURSEL, 0, 0);
 
     st.chk_trails = mk("BUTTON", "Activar estelas de movimiento", BS_AUTOCHECKBOX, COL_L, 402, 240, 22);
     SendMessageA(st.chk_trails, BM_SETCHECK, BST_CHECKED, 0);
@@ -1090,6 +1324,9 @@ bool show_launcher_dialog(
 } // namespace
 
 int main(int argc, char** argv) {
+    _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
+
+    const seird::HardwareLimits hw = seird::cuda_query_hardware_limits();
     int  num_agents = 500000;
     bool bench_mode = false;
 
@@ -1098,7 +1335,7 @@ int main(int argc, char** argv) {
         if (arg == "--bench") {
             bench_mode = true;
         } else if (arg == "--agents" && i + 1 < argc) {
-            num_agents = std::max(1000, std::atoi(argv[++i]));
+            num_agents = std::clamp(std::atoi(argv[++i]), 1000, std::max(1000, hw.safe_agents_limit));
         } else if (arg == "--infected" && i + 1 < argc) {
             g_initial_infected = std::max(1, std::atoi(argv[++i]));
         } else if (arg == "--substeps" && i + 1 < argc) {
@@ -1138,9 +1375,11 @@ int main(int argc, char** argv) {
 
     HINSTANCE hinst = GetModuleHandleA(nullptr);
 
-    if (!show_launcher_dialog(hinst, num_agents, g_initial_infected, g_params, g_substeps, g_chart_days, g_paused)) {
+    bool start_paused_flag = g_paused.load();
+    if (!show_launcher_dialog(hinst, num_agents, g_initial_infected, g_params, g_substeps, g_chart_days, start_paused_flag)) {
         return 0;
     }
+    g_paused.store(start_paused_flag);
 
     WNDCLASSA wc = {};
     wc.style         = CS_OWNDC;
@@ -1176,7 +1415,7 @@ int main(int argc, char** argv) {
     );
 
     create_sidebar_controls(hwnd, hinst);
-    if (g_btn_pause) SetWindowTextA(g_btn_pause, g_paused ? "Iniciar [SPACE]" : "Pausar [SPACE]");
+    if (g_btn_pause) SetWindowTextA(g_btn_pause, g_paused.load() ? "Iniciar [SPACE]" : "Pausar [SPACE]");
     update_visual_buttons();
     layout_controls(g_win_w, g_win_h);
 
@@ -1227,131 +1466,358 @@ int main(int argc, char** argv) {
     glBindTexture(GL_TEXTURE_2D, 0);
 
     cudaGraphicsResource_t cuda_tex_res = nullptr;
-    if (cudaGraphicsGLRegisterImage(
-            &cuda_tex_res, gl_tex, GL_TEXTURE_2D,
-            cudaGraphicsRegisterFlagsWriteDiscard) != cudaSuccess) {
-        std::fprintf(stderr, "Error en cudaGraphicsGLRegisterImage.\n");
-        return 1;
+    std::vector<uint8_t> host_fb_fallback;
+    cudaError_t reg_err = cudaGraphicsGLRegisterImage(
+        &cuda_tex_res, gl_tex, GL_TEXTURE_2D,
+        cudaGraphicsRegisterFlagsWriteDiscard
+    );
+    if (reg_err != cudaSuccess) {
+        const char* gl_renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+        std::fprintf(
+            stderr,
+            "[AVISO] cudaGraphicsGLRegisterImage fallo (%s) en GL_RENDERER='%s'. "
+            "Usando copia CPU->OpenGL como respaldo.\n",
+            cudaGetErrorString(reg_err),
+            gl_renderer ? gl_renderer : "desconocido"
+        );
+        cuda_tex_res = nullptr;
+        host_fb_fallback.resize(
+            static_cast<size_t>(seird::FRAME_WIDTH) * seird::FRAME_HEIGHT * 4
+        );
     }
 
-    seird::AgentSystemDevice dev;
-    seird::SimStats stats;
-    seird::CpuTelemetryEngine telemetry(64);
-    seird::TelemetryMetrics metrics;
-    std::deque<HistoryPoint> curve_hist;
+    const size_t fb_bytes = static_cast<size_t>(seird::FRAME_WIDTH) * seird::FRAME_HEIGHT * 4;
+    uint8_t* d_fb_display = nullptr;
+    cudaStream_t gl_copy_stream = nullptr;
+    if (cudaMalloc(&d_fb_display, fb_bytes) != cudaSuccess ||
+        cudaStreamCreateWithFlags(&gl_copy_stream, cudaStreamNonBlocking) != cudaSuccess) {
+        std::fprintf(stderr, "Error al reservar framebuffer de despliegue en CUDA.\n");
+        return 1;
+    }
+    cudaMemset(d_fb_display, 0, fb_bytes);
 
-    if (!seird::cuda_init_simulation(dev, num_agents, g_initial_infected, g_params)) {
+    std::mutex g_fb_mtx;
+    std::mutex g_publish_mtx;
+    std::atomic<bool> g_frame_ready{false};
+    std::atomic<bool> worker_init_done{false};
+    std::atomic<bool> worker_init_ok{false};
+
+    seird::SimStats                 pub_stats{};
+    seird::TelemetryMetrics         pub_metrics{};
+    seird::EnsembleMetrics          pub_ensemble{};
+    std::deque<HistoryPoint>        pub_curve_hist;
+    std::vector<seird::TelemetryMetrics> pub_history;
+    std::vector<seird::EnsembleMetrics>  pub_ens_history;
+    double   pub_gpu_ms     = 0.0;
+    uint64_t pub_seed       = 42ULL;
+    int      pub_sim_frames = 0;
+
+    std::thread sim_worker([&]() {
+        cudaSetDevice(0);
+
+        seird::SimParams local_params;
+        int local_substeps = 4;
+        int local_init_inf = 150;
+        {
+            std::lock_guard<std::mutex> lk(g_state_mtx);
+            local_params   = g_params;
+            local_substeps = g_substeps;
+            local_init_inf = g_initial_infected;
+        }
+
+        seird::AgentSystemDevice dev;
+        seird::SimStats stats;
+        std::vector<seird::SimStats> rep_stats;
+        seird::CpuTelemetryEngine telemetry(64);
+        seird::CpuEnsembleEngine ensemble(local_params.num_replicas, 64);
+        seird::TelemetryMetrics metrics;
+        seird::EnsembleMetrics ens_metrics;
+        std::deque<HistoryPoint> curve_hist;
+        seird::OdeState ode_ref{};
+        uint64_t active_seed = 42ULL;
+
+        if (!seird::cuda_init_simulation(dev, num_agents, local_init_inf, local_params, active_seed)) {
+            worker_init_ok.store(false);
+            worker_init_done.store(true);
+            return;
+        }
+
+        auto reset_host_state = [&](int init_inf, const seird::SimParams& p) {
+            int clamped_init = std::min(init_inf, num_agents);
+            stats = seird::SimStats{};
+            stats.count_s = static_cast<uint32_t>(std::max(0, num_agents - clamped_init));
+            stats.count_i = static_cast<uint32_t>(clamped_init);
+
+            ode_ref = seird::OdeState{
+                static_cast<double>(stats.count_s), 0.0,
+                static_cast<double>(stats.count_i), 0.0, 0.0, 0.0
+            };
+
+            metrics = seird::TelemetryMetrics{};
+            metrics.stats  = stats;
+            metrics.r0_ngm = static_cast<float>(seird::compute_r0_ngm(num_agents, p));
+
+            ensemble.reset(p.num_replicas);
+            ens_metrics = seird::EnsembleMetrics{};
+            ens_metrics.num_replicas = p.num_replicas;
+
+            float tot = static_cast<float>(std::max(1, num_agents));
+            float i0  = static_cast<float>(stats.count_i) / tot;
+            ens_metrics.i_p05 = i0;
+            ens_metrics.i_p50 = i0;
+            ens_metrics.i_p95 = i0;
+
+            curve_hist.clear();
+            curve_hist.push_back({
+                0.0f,
+                static_cast<float>(stats.count_s) / tot,
+                0.0f,
+                i0,
+                0.0f,
+                0.0f,
+                static_cast<float>(ode_ref.i) / tot,
+                i0, i0, i0
+            });
+
+            seird::cuda_render_1080p_device(dev, p);
+            {
+                std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
+                seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
+            }
+            {
+                std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+                pub_stats       = stats;
+                pub_metrics     = metrics;
+                pub_ensemble    = ens_metrics;
+                pub_curve_hist  = curve_hist;
+                pub_history     = telemetry.history();
+                pub_ens_history = ensemble.history();
+                pub_seed        = active_seed;
+            }
+            g_frame_ready.store(true);
+        };
+
+        reset_host_state(local_init_inf, local_params);
+        worker_init_ok.store(true);
+        worker_init_done.store(true);
+
+        auto last_stats_time = std::chrono::steady_clock::now() - std::chrono::milliseconds(250);
+
+        while (g_running.load()) {
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                local_params   = g_params;
+                local_substeps = g_substeps;
+                local_init_inf = g_initial_infected;
+            }
+
+            if (g_reset_requested.exchange(false)) {
+                telemetry.reset();
+                active_seed = static_cast<uint64_t>(
+                    std::chrono::steady_clock::now().time_since_epoch().count()
+                );
+                int clamped_init = std::min(local_init_inf, num_agents);
+                seird::cuda_init_simulation(dev, num_agents, clamped_init, local_params, active_seed);
+                reset_host_state(clamped_init, local_params);
+            }
+
+            if (!g_paused.load()) {
+                auto step_t0 = std::chrono::steady_clock::now();
+                bool want_stats = (std::chrono::duration<double>(step_t0 - last_stats_time).count() >= 0.20);
+
+                seird::cuda_timer_begin();
+                const double beta_kin = seird::compute_abm_kinetic_beta(num_agents, local_params);
+                for (int s = 0; s < local_substeps; ++s) {
+                    bool is_last = (s == local_substeps - 1);
+                    const bool sample_now = want_stats && is_last;
+                    seird::cuda_step_simulation(
+                        dev, local_params, nullptr, stats, sample_now,
+                        (sample_now && local_params.num_replicas > 1) ? &rep_stats : nullptr
+                    );
+                    ode_ref = seird::ode_seirds_step_rk4(ode_ref, beta_kin, local_params, static_cast<double>(local_params.dt));
+                }
+
+                if (want_stats) {
+                    last_stats_time = step_t0;
+                    metrics = telemetry.update(stats, local_params);
+                    float tot = static_cast<float>(std::max(1, num_agents));
+                    float i_frac = static_cast<float>(stats.count_i) / tot;
+                    float i05 = i_frac, i50 = i_frac, i95 = i_frac;
+                    if (local_params.num_replicas > 1 && !rep_stats.empty()) {
+                        ens_metrics = ensemble.update(rep_stats, local_params, num_agents);
+                        metrics.rt_p05       = ens_metrics.rt_p05;
+                        metrics.rt_p95       = ens_metrics.rt_p95;
+                        metrics.prob_rt_gt_1 = ens_metrics.prob_rt_gt_1;
+                        i05 = ens_metrics.i_p05;
+                        i50 = ens_metrics.i_p50;
+                        i95 = ens_metrics.i_p95;
+                    }
+                    curve_hist.push_back({
+                        stats.sim_day,
+                        static_cast<float>(stats.count_s) / tot,
+                        static_cast<float>(stats.count_e) / tot,
+                        i_frac,
+                        static_cast<float>(stats.count_r) / tot,
+                        static_cast<float>(stats.count_d) / tot,
+                        static_cast<float>(ode_ref.i) / tot,
+                        i05, i50, i95
+                    });
+                    if (curve_hist.size() > 2048) curve_hist.pop_front();
+                }
+
+                seird::cuda_render_1080p_device(dev, local_params);
+                double gpu_ms = static_cast<double>(seird::cuda_timer_end_ms());
+
+                {
+                    std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
+                    seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
+                }
+                {
+                    std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+                    pub_stats  = stats;
+                    pub_gpu_ms = gpu_ms;
+                    ++pub_sim_frames;
+                    if (want_stats) {
+                        pub_metrics     = metrics;
+                        pub_ensemble    = ens_metrics;
+                        pub_curve_hist  = curve_hist;
+                        pub_history     = telemetry.history();
+                        pub_ens_history = ensemble.history();
+                    }
+                }
+                g_frame_ready.store(true);
+
+                // Control de cadencia para preservar cámara lenta en 1 paso/frame sin frenar cargas pesadas
+                const double target_sim_ms = (local_substeps == 1) ? 33.3 : 16.6;
+                const double step_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - step_t0
+                ).count();
+                if (step_ms < target_sim_ms) {
+                    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(target_sim_ms - step_ms));
+                }
+            } else {
+                if (g_force_render.exchange(false)) {
+                    seird::cuda_render_1080p_device(dev, local_params);
+                    {
+                        std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
+                        seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
+                    }
+                    g_frame_ready.store(true);
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(8));
+                }
+            }
+        }
+
+        seird::cuda_free_simulation(dev);
+    });
+
+    while (!worker_init_done.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!worker_init_ok.load()) {
+        if (sim_worker.joinable()) sim_worker.join();
         std::fprintf(stderr, "Error al inicializar CUDA.\n");
         return 1;
     }
 
-    auto init_stats_zero = [&]() {
-        int clamped_init = std::min(g_initial_infected, num_agents);
-        stats = seird::SimStats{};
-        stats.count_s = static_cast<uint32_t>(std::max(0, num_agents - clamped_init));
-        stats.count_i = static_cast<uint32_t>(clamped_init);
-        float tot = static_cast<float>(std::max(1, num_agents));
-        curve_hist.clear();
-        curve_hist.push_back({
-            0.0f,
-            static_cast<float>(stats.count_s) / tot,
-            0.0f,
-            static_cast<float>(stats.count_i) / tot,
-            0.0f,
-            0.0f
-        });
-    };
-    init_stats_zero();
+    seird::SimStats                 ui_stats{};
+    seird::TelemetryMetrics         ui_metrics{};
+    seird::EnsembleMetrics          ui_ensemble{};
+    std::deque<HistoryPoint>        ui_curve_hist;
+    double ui_gpu_ms = 0.0;
 
-    bool need_render   = true;
-    double last_gpu_ms = 0.0;
     float vram_used_mb = 0.0f, vram_total_mb = 0.0f;
     seird::cuda_get_vram_info(vram_used_mb, vram_total_mb);
 
-    int frame_counter = 0;
+    int ui_frame_counter = 0;
     auto last_ui_time = std::chrono::steady_clock::now() - std::chrono::milliseconds(300);
 
-    while (g_running) {
+    while (g_running.load()) {
         MSG msg;
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
-        if (!g_running) break;
-
-        if (g_reset_requested) {
-            g_reset_requested = false;
-            telemetry.reset();
-            uint64_t seed = static_cast<uint64_t>(
-                std::chrono::steady_clock::now().time_since_epoch().count()
-            );
-            int clamped_init = std::min(g_initial_infected, num_agents);
-            seird::cuda_init_simulation(dev, num_agents, clamped_init, g_params, seed);
-            init_stats_zero();
-            g_chart_scroll_day = 0.0f;
-            g_chart_autofollow = true;
-            need_render = true;
-        }
-
-        if (g_export_requested) {
-            g_export_requested = false;
-            export_simulation_report(hwnd, telemetry, stats, num_agents, last_gpu_ms);
-        }
+        if (!g_running.load()) break;
 
         auto frame_t0 = std::chrono::steady_clock::now();
 
-        if (!g_paused) {
-            auto gpu_t0 = std::chrono::steady_clock::now();
-            bool want_stats = (std::chrono::duration<double>(frame_t0 - last_ui_time).count() >= 0.20);
-            for (int s = 0; s < g_substeps; ++s) {
-                bool is_last = (s == g_substeps - 1);
-                seird::cuda_step_simulation(dev, g_params, nullptr, stats, want_stats && is_last);
+        if (g_export_requested.exchange(false)) {
+            std::vector<seird::TelemetryMetrics> hist_copy;
+            std::vector<seird::EnsembleMetrics>  ens_hist_copy;
+            seird::EnsembleMetrics ens_copy{};
+            seird::SimStats stats_copy{};
+            seird::SimParams params_copy{};
+            uint64_t seed_copy = 42ULL;
+            double gpu_ms_copy = 0.0;
+            int init_inf_copy  = 150;
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                params_copy   = g_params;
+                init_inf_copy = g_initial_infected;
             }
-            if (want_stats) {
-                metrics = telemetry.update(stats, g_params);
-                float tot = static_cast<float>(std::max(1, num_agents));
-                curve_hist.push_back({
-                    stats.sim_day,
-                    static_cast<float>(stats.count_s) / tot,
-                    static_cast<float>(stats.count_e) / tot,
-                    static_cast<float>(stats.count_i) / tot,
-                    static_cast<float>(stats.count_r) / tot,
-                    static_cast<float>(stats.count_d) / tot
-                });
-                if (curve_hist.size() > 2048) curve_hist.pop_front();
+            {
+                std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+                hist_copy     = pub_history;
+                ens_hist_copy = pub_ens_history;
+                ens_copy      = pub_ensemble;
+                stats_copy    = pub_stats;
+                seed_copy     = pub_seed;
+                gpu_ms_copy   = pub_gpu_ms;
             }
-            seird::cuda_render_1080p_device(dev, g_params);
-            auto gpu_t1 = std::chrono::steady_clock::now();
-            last_gpu_ms = std::chrono::duration<double, std::milli>(gpu_t1 - gpu_t0).count();
-            need_render = true;
-        } else {
-            if (g_force_render) {
-                g_force_render = false;
-                need_render = true;
+            export_simulation_report(
+                hwnd, hist_copy, ens_hist_copy, ens_copy, stats_copy, params_copy,
+                seed_copy, num_agents, init_inf_copy, gpu_ms_copy
+            );
+        }
+
+        if (g_frame_ready.exchange(false)) {
+            std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
+            if (cuda_tex_res != nullptr) {
+                cudaArray_t cu_array = nullptr;
+                if (cudaGraphicsMapResources(1, &cuda_tex_res, gl_copy_stream) == cudaSuccess) {
+                    if (cudaGraphicsSubResourceGetMappedArray(&cu_array, cuda_tex_res, 0, 0) == cudaSuccess) {
+                        cudaMemcpy2DToArrayAsync(
+                            cu_array, 0, 0,
+                            d_fb_display,
+                            static_cast<size_t>(seird::FRAME_WIDTH) * 4,
+                            static_cast<size_t>(seird::FRAME_WIDTH) * 4,
+                            seird::FRAME_HEIGHT,
+                            cudaMemcpyDeviceToDevice,
+                            gl_copy_stream
+                        );
+                    }
+                    cudaGraphicsUnmapResources(1, &cuda_tex_res, gl_copy_stream);
+                    cudaStreamSynchronize(gl_copy_stream);
+                }
             } else {
-                Sleep(16);
+                if (cudaMemcpyAsync(host_fb_fallback.data(), d_fb_display, fb_bytes, cudaMemcpyDeviceToHost, gl_copy_stream) == cudaSuccess) {
+                    cudaStreamSynchronize(gl_copy_stream);
+                    glBindTexture(GL_TEXTURE_2D, gl_tex);
+                    glTexSubImage2D(
+                        GL_TEXTURE_2D, 0, 0, 0,
+                        seird::FRAME_WIDTH, seird::FRAME_HEIGHT,
+                        GL_RGBA, GL_UNSIGNED_BYTE, host_fb_fallback.data()
+                    );
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                }
             }
         }
 
-        if (need_render) {
-            need_render = false;
-            if (g_paused) {
-                seird::cuda_render_1080p_device(dev, g_params);
-            }
-            cudaArray_t cu_array = nullptr;
-            if (cudaGraphicsMapResources(1, &cuda_tex_res, 0) == cudaSuccess) {
-                if (cudaGraphicsSubResourceGetMappedArray(&cu_array, cuda_tex_res, 0, 0) == cudaSuccess) {
-                    cudaMemcpy2DToArray(
-                        cu_array, 0, 0,
-                        dev.framebuffer_rgba,
-                        static_cast<size_t>(seird::FRAME_WIDTH) * 4,
-                        static_cast<size_t>(seird::FRAME_WIDTH) * 4,
-                        seird::FRAME_HEIGHT,
-                        cudaMemcpyDeviceToDevice
-                    );
-                }
-                cudaGraphicsUnmapResources(1, &cuda_tex_res, 0);
-            }
+        {
+            std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+            ui_stats      = pub_stats;
+            ui_metrics    = pub_metrics;
+            ui_ensemble   = pub_ensemble;
+            ui_curve_hist = pub_curve_hist;
+            ui_gpu_ms     = pub_gpu_ms;
+        }
+
+        int rep_count_ui = 1;
+        {
+            std::lock_guard<std::mutex> lk(g_state_mtx);
+            rep_count_ui = g_params.num_replicas;
         }
 
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1367,35 +1833,70 @@ int main(int argc, char** argv) {
         glBindTexture(GL_TEXTURE_2D, 0);
         glDisable(GL_TEXTURE_2D);
 
-        draw_epidemic_curve_overlay(curve_hist, stats.sim_day, g_chart_days);
+        draw_epidemic_curve_overlay(ui_curve_hist, ui_stats.sim_day, g_chart_days, rep_count_ui);
         SwapBuffers(hdc);
 
-        // Limitar a ~30 FPS visuales para no saturar WDDM/CPU con Map/Unmap
+        // Mantener UI fluida (~60 FPS) sin bloquear por substeps de CUDA
         auto frame_t1 = std::chrono::steady_clock::now();
         double frame_ms = std::chrono::duration<double, std::milli>(frame_t1 - frame_t0).count();
-        if (frame_ms < 30.0) {
-            Sleep(static_cast<DWORD>(30.0 - frame_ms));
+        if (frame_ms < 16.0) {
+            Sleep(static_cast<DWORD>(16.0 - frame_ms));
         }
 
-        ++frame_counter;
+        ++ui_frame_counter;
         auto now = std::chrono::steady_clock::now();
         double elapsed_s = std::chrono::duration<double>(now - last_ui_time).count();
         if (elapsed_s >= 0.25) {
-            double fps = static_cast<double>(frame_counter) / elapsed_s;
+            int sim_frames_dt = 0;
+            {
+                std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+                sim_frames_dt  = pub_sim_frames;
+                pub_sim_frames = 0;
+            }
+            const bool paused_now = g_paused.load();
+            double fps = (!paused_now && sim_frames_dt > 0)
+                ? (static_cast<double>(sim_frames_dt) / elapsed_s)
+                : (paused_now ? 0.0 : (static_cast<double>(ui_frame_counter) / elapsed_s));
+
             seird::cuda_get_vram_info(vram_used_mb, vram_total_mb);
             float vram_pct = (vram_total_mb > 0.0f) ? (100.0f * vram_used_mb / vram_total_mb) : 0.0f;
 
-            int whole_days = static_cast<int>(stats.sim_day);
-            int hours = static_cast<int>((stats.sim_day - static_cast<float>(whole_days)) * 24.0f + 0.5f) % 24;
-            const char* status_str = g_paused ? "PAUSADO" : (metrics.outbreak_alert ? "BROTE ACTIVO" : "NORMAL");
+            seird::SimParams params_snap;
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                params_snap = g_params;
+            }
 
-            char stats_txt[640];
+            int whole_days = static_cast<int>(ui_stats.sim_day);
+            int hours = static_cast<int>((ui_stats.sim_day - static_cast<float>(whole_days)) * 24.0f + 0.5f) % 24;
+            const float inf_pct = (num_agents > 0)
+                ? (static_cast<float>(ui_stats.count_i) / static_cast<float>(num_agents))
+                : 0.0f;
+            const bool hosp_sat = (inf_pct > params_snap.hospital_capacity_pct);
+            const char* status_str = paused_now
+                ? "PAUSADO"
+                : (hosp_sat
+                    ? "HOSP. SATURADO"
+                    : (params_snap.focal_quarantine
+                        ? "CUARENTENA FOCAL [F]"
+                        : (ui_metrics.outbreak_alert ? "BROTE ACTIVO" : "NORMAL")));
+
+            char ens_line[80];
+            if (params_snap.num_replicas > 1) {
+                std::snprintf(ens_line, sizeof(ens_line), "Ensamble K=%d | Ext: %.0f%% | %s",
+                              params_snap.num_replicas, ui_ensemble.extinction_pct, status_str);
+            } else {
+                std::snprintf(ens_line, sizeof(ens_line), "Focos: %u (Pico %.1fx) | %s",
+                              ui_stats.hotspot_cells, ui_stats.max_cell_z, status_str);
+            }
+
+            char stats_txt[768];
             std::snprintf(
                 stats_txt, sizeof(stats_txt),
-                "SIMULACION SEIRD | %d personas\n"
-                "Dia: %.2f (%dd %02dh) | Contagio (Rt): %.2f\n"
-                "Focos de Brote: %u zonas (Pico %.1fx)\n"
-                "Estado: %s\n"
+                "SIMULACION SEIRD | %d%s\n"
+                "Dia: %.2f (%dd %02dh) | Rt: %.2f [%.2f-%.2f]\n"
+                "P(Rt>1): %.0f%% | R0(NGM): %.2f | Inc: %.0f/d\n"
+                "%s\n"
                 "------------------------------\n"
                 "Susceptibles (S): %u\n"
                 "Expuestos    (E): %u\n"
@@ -1407,26 +1908,36 @@ int main(int argc, char** argv) {
                 "FPS: %.0f  |  GPU: %.2f ms  |  Zoom: %.1fx\n"
                 "VRAM: %.0f / %.0f MB (%.1f%%)",
                 num_agents,
-                stats.sim_day, whole_days, hours, metrics.rt,
-                stats.hotspot_cells, stats.max_cell_z,
-                status_str,
-                stats.count_s, stats.count_e, stats.count_i, stats.count_r, stats.count_d,
-                metrics.cfr * 100.0f,
-                fps, last_gpu_ms, g_params.cam_zoom,
+                (params_snap.num_replicas > 1) ? " x K" : " personas",
+                ui_stats.sim_day, whole_days, hours, ui_metrics.rt, ui_metrics.rt_p05, ui_metrics.rt_p95,
+                ui_metrics.prob_rt_gt_1 * 100.0f, ui_metrics.r0_ngm, ui_metrics.new_cases_rate,
+                ens_line,
+                ui_stats.count_s, ui_stats.count_e, ui_stats.count_i, ui_stats.count_r, ui_stats.count_d,
+                ui_metrics.cfr * 100.0f,
+                fps, ui_gpu_ms, params_snap.cam_zoom,
                 vram_used_mb, vram_total_mb, vram_pct
             );
             SetWindowTextA(g_lbl_stats, stats_txt);
-            frame_counter = 0;
+            ui_frame_counter = 0;
             last_ui_time = now;
         }
     }
 
+    if (sim_worker.joinable()) {
+        sim_worker.join();
+    }
+    if (gl_copy_stream != nullptr) {
+        cudaStreamDestroy(gl_copy_stream);
+    }
+    if (d_fb_display != nullptr) {
+        cudaFree(d_fb_display);
+    }
     if (g_gl_font_base != 0) {
         glDeleteLists(g_gl_font_base, 96);
     }
-
-    cudaGraphicsUnregisterResource(cuda_tex_res);
-    seird::cuda_free_simulation(dev);
+    if (cuda_tex_res != nullptr) {
+        cudaGraphicsUnregisterResource(cuda_tex_res);
+    }
     glDeleteTextures(1, &gl_tex);
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(hglrc);

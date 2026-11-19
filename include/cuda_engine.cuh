@@ -2,12 +2,14 @@
 
 #include "types.hpp"
 
+#include <vector>
+
 namespace seird {
 
 // Inicializa memoria en VRAM, estados RNG y población inicial (con pacientes cero)
 bool cuda_init_simulation(
     AgentSystemDevice& dev,
-    int num_agents,
+    int agents_per_replica,
     int initial_infected,
     const SimParams& params,
     uint64_t seed = 42ULL
@@ -19,7 +21,8 @@ void cuda_step_simulation(
     const SimParams& params,
     uint8_t* host_framebuffer_rgba,
     SimStats& out_stats,
-    bool compute_stats = true
+    bool compute_stats = true,
+    std::vector<SimStats>* out_replica_stats = nullptr
 );
 
 // Renderiza el framebuffer 1080p únicamente en VRAM (sin copiar a CPU)
@@ -28,8 +31,32 @@ void cuda_render_1080p_device(
     const SimParams& params
 );
 
+// Sincroniza el stream de simulación CUDA
+void cuda_sync_simulation();
+
+// Copia framebuffer_rgba (VRAM) a un buffer de despliegue en VRAM (D2D) para doble buffering
+bool cuda_copy_framebuffer_to_device(const AgentSystemDevice& dev, uint8_t* dst_device_rgba);
+
+// Temporizador GPU exacto sobre el stream de simulación (sin exponer cudaEvent_t en headers)
+void  cuda_timer_begin();
+float cuda_timer_end_ms();
+
 // Consulta uso de VRAM en MB para telemetría
 void cuda_get_vram_info(float& used_mb, float& total_mb);
+
+struct HardwareLimits {
+    size_t vram_free_mb      = 0;
+    size_t vram_total_mb     = 0;
+    size_t bytes_per_agent   = 0;
+    int    max_agents_vram   = 0;
+    int    safe_agents_limit = 0; // Tope recomendado considerando densidad y WDDM
+};
+
+// Consulta la VRAM disponible y calcula el máximo de agentes soportado dinámicamente
+HardwareLimits cuda_query_hardware_limits(size_t reserve_vram_mb = 1024);
+
+// Escala dominio espacial y malla proporcionalmente para mantener densidad segura por celda
+void cuda_adjust_domain_for_agents(SimParams& params, int num_agents);
 
 struct BenchmarkResult {
     int    num_agents      = 0;

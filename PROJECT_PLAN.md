@@ -3,16 +3,16 @@
 Este documento resume las decisiones técnicas, el modelo matemático y el plan de implementación definidos para el proyecto.
 
 ## 1. Hardware y Stack Tecnológico
-* **GPU Objetivo:** NVIDIA GTX 1650 Ti Laptop (4 GB VRAM, arquitectura Turing CC 7.5, 1024 CUDA cores).
-* **Stack Principal:** C++17, NVIDIA CUDA 12.x (`cuRAND`, `Thrust`), OpenMP + AVX2 (CPU), CMake $\ge 3.20$.
-* **Visualización / Red (estilo `geoThermal-Parallel`):** Servidor HTTP embebido (`httplib.h`) con streaming binario RGBA 1080p (`application/octet-stream`) hacia Canvas HTML5 / Leaflet.js.
+* **GPU Objetivo:** NVIDIA GeForce RTX 5050 Laptop GPU (8 GB VRAM, arquitectura Blackwell `sm_120`).
+* **Stack Principal:** C++17, NVIDIA CUDA 13.x (`cuRAND`, `CUB DeviceRadixSort`), OpenMP + AVX2 (CPU), CMake $\ge 3.20$.
+* **Visualización:** Interfaz nativa Win32 + OpenGL con framebuffer RGBA 1080p renderizado en GPU y gráficas de telemetría en tiempo real.
 
 ## 2. Modelo Epidemiológico y Computacional Elegido
 * **Modelo:** **ABM (Agent-Based Model) con dinámica SEIRD Estocástica** en espacio 2D continuo.
   * **S** (Susceptible) $\xrightarrow{\beta}$ **E** (Expuesto / incubando, no contagia) $\xrightarrow{\sigma}$ **I** (Infectado / contagioso).
   * Al terminar el periodo infeccioso ($I$): con probabilidad $\alpha$ (tasa de letalidad) pasa a **D** (Fallecido, estático y no contagia), y con $1 - \alpha$ pasa a **R** (Recuperado / inmune).
-* **Aceleración en GPU:** **Spatial Hashing (*Uniform Grid*)** con `thrust::sort_by_key` para evaluar contagios en $O(N)$ en lugar de $O(N^2)$.
-* **Capacidad:** ~500,000 a 1,000,000 de agentes en ~100–120 MB de VRAM (sobra margen dentro de los 4 GB).
+* **Aceleración en GPU:** **Spatial Hashing (*Uniform Grid*)** con `cub::DeviceRadixSort::SortPairs` para evaluar contagios en $O(N)$ en lugar de $O(N^2)$.
+* **Capacidad:** Límites dinámicos calculados vía `cudaMemGetInfo` (`cuda_query_hardware_limits`), escalando el dominio espacial y la malla automáticamente (`cuda_adjust_domain_for_agents`) para soportar millones de agentes sin saturar celdas ni disparar TDR.
 
 ## 3. Diseño de Memoria (SoA - *Structure of Arrays*)
 Definido en `include/types.hpp`:
@@ -37,4 +37,10 @@ Definido en `include/types.hpp`:
   * [x] **Paso 2:** Implementar `src/cuda_engine.cu`.
   * [x] **Paso 3:** Crear `CMakeLists.txt` y `src/cpu_engine.cpp` (telemetría OpenMP, $R_t$, $Z$-score de brotes).
 * **Pendiente:**
-  * [x] **Paso 4:** Implementar `src/main.cpp` (`httplib`) y frontend en `web/` (Leaflet.js + controles de cuarentena/vacunación).
+  * [x] **Paso 4:** Implementar `src/main.cpp` (UI nativa Win32 + OpenGL y reportes).
+  * [x] **Fase 0:** Límites dinámicos por VRAM (`cuda_query_hardware_limits`), escalado de dominio (`cuda_adjust_domain_for_agents`) y suite de pruebas de invariantes (`tests/test_invariants.cpp`).
+  * [x] **Fase 1:** RNG *stateless* (`rand_u01`), Radix Sort acotado a bits activos, reordenamiento físico (`kernel_reorder_agents`), salto de celdas sin infectados, *stream* dedicado y *pinned memory*.
+  * [x] **Fase 2:** Grupos de riesgo (`RiskGroup`), movilidad urbana estructurada, cuarentena focalizada por Z-score (`[F]`), saturación hospitalaria, vacunación e inmunidad decreciente.
+  * [x] **Bloque 1:** Conteo exacto `new_exposures` (`S -> E`) en GPU, Solver ODE SEIRDS (RK4), $R_0$ por Matriz de Siguiente Generación (NGM), bootstrap OpenMP de $R_t$ (`[P5-P95]`, `P(Rt>1)`) y pruebas de convergencia analítica.
+  * [x] **Bloque 2:** Movilidad Lagrangiana con ciclo diurno (`home_zone`, 8 polos orgánicos), superdispersión (`FLAG_SUPERSPREADER`), $R_0(\text{NGM})$ cinético 2D, eliminación de *spin-wait* OpenMP, hilo *Worker* CUDA desacoplado de UI Win32/OpenGL, curva `I_ODE` en gráfica y exportación reproducible CSV+JSON en `reports/`.
+  * [x] **Bloque 3:** Ensambles Monte Carlo en paralelo en GPU (*single-launch multi-replica*, `K=1..32`), reducción OpenMP (`CpuEnsembleEngine`) con percentiles P5/P50/P95, $\mathbb{P}(R_t>1)$, tasa de extinción y banda sombreada P5–P95 en la gráfica.

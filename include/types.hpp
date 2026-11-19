@@ -6,6 +6,7 @@ namespace seird {
 
 constexpr int FRAME_WIDTH  = 1920;
 constexpr int FRAME_HEIGHT = 1080;
+constexpr int MAX_REPLICAS = 64;
 
 enum AgentState : uint8_t {
     STATE_S = 0, // Susceptible
@@ -14,6 +15,15 @@ enum AgentState : uint8_t {
     STATE_R = 3, // Recuperado (inmune)
     STATE_D = 4  // Fallecido (estático, no contagia)
 };
+
+enum RiskGroup : uint8_t {
+    RISK_LOW    = 0, // Jóvenes (~50%): mayor movilidad, menor letalidad (0.25x)
+    RISK_MEDIUM = 1, // Adultos (~35%): movilidad y letalidad base (1.0x)
+    RISK_HIGH   = 2  // Vulnerable/Mayor (~15%): menor movilidad, mayor letalidad (3.5x)
+};
+
+constexpr uint8_t RISK_GROUP_MASK    = 0x03u; // Bits 0-1: RISK_LOW / RISK_MEDIUM / RISK_HIGH
+constexpr uint8_t FLAG_SUPERSPREADER = 0x80u; // Bit 7: agente superdispersor (0 bytes extra)
 
 enum RenderMode : int {
     RENDER_AGENTS  = 0, // Solo agentes con prioridad visual (I > E > R > S > D)
@@ -43,6 +53,16 @@ struct alignas(32) SimParams {
     float base_speed        = 15.0f;        // Velocidad base (unidades / día)
     float quarantine_factor = 1.0f;         // 1.0 = normal, 0.1 = cuarentena estricta
 
+    // Realismo epidemiológico (Fase 2 / Bloque 2)
+    float urban_clustering      = 0.25f; // Atracción hacia centros de actividad (0 = gas uniforme)
+    bool  focal_quarantine      = false; // Cuarentena automática en celdas con Z-score > 2.0
+    float hospital_capacity_pct = 0.05f; // Umbral de infectados (5% pop) antes de saturación
+    float vaccination_rate      = 0.0f;  // Tasa diaria de vacunación (S -> R)
+    float immunity_days         = 0.0f;  // Duración inmunidad R -> S (0 = permanente)
+    float superspreader_frac    = 0.10f; // Fracción de agentes superdispersores (10%)
+    float superspreader_mult    = 4.0f;  // Multiplicador de riesgo de contagio por contacto
+    int   num_replicas          = 1;     // Réplicas Monte Carlo en paralelo (1..MAX_REPLICAS)
+
     // Opciones de visualización en GPU y cámara (Zoom/Pan)
     int   render_mode   = RENDER_HYBRID;
     bool  enable_trails = true;
@@ -58,6 +78,7 @@ struct SimStats {
     uint32_t count_i       = 0;
     uint32_t count_r       = 0;
     uint32_t count_d       = 0;
+    uint32_t new_exposures = 0;    // Contagios reales acumulados (S -> E) desde el último muestreo
     uint32_t hotspot_cells = 0;    // Celdas con brote anómalo (Z > 2.0 en GPU)
     float    max_cell_z    = 0.0f; // Z-score espacial máximo calculado en GPU
     float    sim_day       = 0.0f;
@@ -65,8 +86,10 @@ struct SimStats {
 
 // Punteros a memoria de GPU en formato Structure of Arrays (SoA)
 struct AgentSystemDevice {
-    int num_agents = 0;
-    int num_cells  = 0;
+    int num_agents         = 0; // Total de agentes en GPU (agents_per_replica * num_replicas)
+    int agents_per_replica = 0; // Agentes por réplica
+    int num_replicas       = 1; // Número de réplicas Monte Carlo
+    int num_cells          = 0; // Celdas por réplica (grid_w * grid_h)
 
     // Cinemática
     float* x  = nullptr;
@@ -74,8 +97,11 @@ struct AgentSystemDevice {
     float* vx = nullptr;
     float* vy = nullptr;
 
-    // Estado SEIRD
+    // Estado SEIRD y estratificación
     uint8_t* state       = nullptr;
+    uint8_t* risk_group  = nullptr;
+    uint8_t* home_zone   = nullptr; // Bits 0-3: hogar (0..7), Bits 4-7: actividad/trabajo (0..7)
+    uint8_t* rep_id      = nullptr; // Índice de réplica Monte Carlo (0..num_replicas-1)
     float*   state_timer = nullptr;
 
     // Spatial Hashing (Uniform Grid)
