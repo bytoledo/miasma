@@ -1,6 +1,6 @@
 <div align="center">
 
-# seird-Parallel (SEIRD HPC Engine)
+# Miasma HPC Engine
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square&logo=c%2B%2B)](https://isocpp.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-13.x-76B900?style=flat-square&logo=nvidia)](https://developer.nvidia.com/cuda-toolkit)
@@ -87,8 +87,8 @@ graph TD
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/bytoledo/seird-Parallel.git
-cd seird-Parallel
+git clone https://github.com/bytoledo/miasma-parallel.git
+cd miasma-parallel
 ```
 
 ### 2. Build the project
