@@ -1,4 +1,4 @@
-# seird-Parallel (SEIRD HPC Engine) — Contexto y Plan de Arquitectura
+# miasma-parallel (Miasma HPC Engine) — Contexto y Plan de Arquitectura
 
 Este documento resume las decisiones técnicas, el modelo matemático y el plan de implementación definidos para el proyecto.
 

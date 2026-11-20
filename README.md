@@ -93,7 +93,7 @@ cd miasma-parallel
 
 ### 2. Build the project
 
-#### Option A: CMake (builds `seird_core`, `seird_parallel.exe`, and `seird_tests.exe`)
+#### Option A: CMake (builds `miasma_core`, `miasma_parallel.exe`, and `miasma_tests.exe`)
 ```powershell
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
@@ -112,7 +112,7 @@ build.bat
 
 ### 3. Run the simulation
 ```powershell
-.\build\seird_parallel.exe
+.\build\miasma_parallel.exe
 ```
 
 From the interactive sidebar, you can adjust the mobility/quarantine factor, transmission rate ($\beta$), fatality rate, contagion radius, substeps per frame, initial cases, toggle interventions (targeted quarantine / vaccination), and export reproducible time-series reports to `reports/`.
@@ -124,7 +124,7 @@ From the interactive sidebar, you can adjust the mobility/quarantine factor, tra
 The repository includes an automated suite of physical, numerical, and epidemiological invariant tests in [`tests/test_invariants.cpp`](tests/test_invariants.cpp):
 
 ```powershell
-.\build\seird_tests.exe
+.\build\miasma_tests.exe
 ```
 
 Verified tests:

@@ -816,8 +816,8 @@ void export_simulation_report(
 
     char csv_name[128];
     char json_name[128];
-    std::strftime(csv_name,  sizeof(csv_name),  "reports/seird_reporte_%Y%m%d_%H%M%S.csv",  &tm_now);
-    std::strftime(json_name, sizeof(json_name), "reports/seird_reporte_%Y%m%d_%H%M%S.json", &tm_now);
+    std::strftime(csv_name,  sizeof(csv_name),  "reports/miasma_reporte_%Y%m%d_%H%M%S.csv",  &tm_now);
+    std::strftime(json_name, sizeof(json_name), "reports/miasma_reporte_%Y%m%d_%H%M%S.json", &tm_now);
 
     std::ofstream out(csv_name);
     if (!out.is_open()) {
@@ -1213,7 +1213,7 @@ bool show_launcher_dialog(
 
     HWND lwnd = CreateWindowExA(
         WS_EX_DLGMODALFRAME, lwc.lpszClassName,
-        "SEIRD-Parallel | Configuracion de Simulacion (Launcher)",
+        "Miasma-Parallel | Configuracion de Simulacion (Launcher)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         sx, sy, W, H, nullptr, nullptr, hinst, nullptr
     );
@@ -1346,7 +1346,7 @@ int main(int argc, char** argv) {
     if (bench_mode) {
         cudaDeviceProp prop{};
         cudaGetDeviceProperties(&prop, 0);
-        std::printf("\n=== SEIRD-Parallel Benchmark (GPU: %s, SM %d.%d) ===\n",
+        std::printf("\n=== Miasma-Parallel Benchmark (GPU: %s, SM %d.%d) ===\n",
                     prop.name, prop.major, prop.minor);
         std::printf("%-12s | %-15s | %-17s | %-18s | %-12s\n",
                     "Agentes", "Sim (ms/paso)", "Render 1080p (ms)", "M agentes/seg", "VRAM (MB)");
@@ -1400,7 +1400,7 @@ int main(int argc, char** argv) {
 
     HWND hwnd = CreateWindowExA(
         0, wc.lpszClassName,
-        "SEIRD-Parallel | Simulacion Epidemiologica CUDA",
+        "Miasma-Parallel | Simulacion Epidemiologica CUDA",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, g_win_w, g_win_h,
         nullptr, nullptr, hinst, nullptr
