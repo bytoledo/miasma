@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/banner.jpg" alt="Miasma HPC Engine - Real-Time CUDA Simulation" width="100%" />
-
 # Miasma HPC Engine
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square&logo=c%2B%2B)](https://isocpp.org/)
@@ -13,6 +11,8 @@
 **Hybrid GPU-accelerated stochastic Agent-Based Model (ABM SEIRD) epidemiological simulation engine in SoA memory (NVIDIA CUDA) with parallel CPU analytics (OpenMP/AVX2), Monte Carlo ensembles, and native 1080p visualization (Win32 + OpenGL).**
 
 [Features](#features) • [Architecture](#hybrid-processing-architecture) • [Structure](#repository-structure) • [Requirements](#system-requirements--dependencies) • [Quickstart](#quickstart) • [Tests](#validation--test-suite) • [Documentation](#documentation--theoretical-framework)
+
+<img src="docs/banner.jpg" alt="Miasma HPC Engine - Real-Time CUDA Simulation" width="100%" />
 
 </div>
 
