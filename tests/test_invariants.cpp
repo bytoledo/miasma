@@ -379,6 +379,123 @@ int test_monte_carlo_ensemble() {
     return 0;
 }
 
+int test_urban_layout_and_family_flow() {
+    constexpr int N = 12000;
+    constexpr int INIT_INF = 120;
+
+    seird::SimParams p;
+    seird::cuda_adjust_domain_for_agents(p, N);
+    seird::cuda_build_urban_preset(p, seird::PRESET_MONOCENTRIC);
+    ASSERT_TRUE(p.enable_urban_layout && p.num_urban_zones > 0, "Preset monocentrico debe crear zonas urbanas");
+
+    seird::AgentSystemDevice dev;
+    ASSERT_TRUE(seird::cuda_init_simulation(dev, N, INIT_INF, p, 98765ULL),
+                "cuda_init_simulation layout urbano");
+
+    seird::SimStats stats;
+    for (int step = 0; step < 96; ++step) { // 2 dias completos (ciclos dia/noche)
+        if (step == 48) {
+            p.household_quarantine = true;
+        }
+        seird::cuda_step_simulation(dev, p, nullptr, stats, true);
+        const uint64_t total = static_cast<uint64_t>(stats.count_s)
+                             + static_cast<uint64_t>(stats.count_e)
+                             + static_cast<uint64_t>(stats.count_i)
+                             + static_cast<uint64_t>(stats.count_r)
+                             + static_cast<uint64_t>(stats.count_d);
+        ASSERT_TRUE(total == static_cast<uint64_t>(N), "Conservacion S+E+I+R+D == N en layout urbano");
+    }
+
+    const uint32_t total_sources = stats.src_home + stats.src_work + stats.src_transit +
+                                   stats.src_hospital + stats.src_leisure;
+    ASSERT_TRUE(total_sources >= static_cast<uint32_t>(INIT_INF), "Atribucion de origen de contagios activa");
+
+    seird::cuda_free_simulation(dev);
+    std::printf("[PASS] test_urban_layout_and_family_flow (H=%u, W=%u, Tr=%u, Hp=%u, L=%u)\n",
+                stats.src_home, stats.src_work, stats.src_transit, stats.src_hospital, stats.src_leisure);
+    return 0;
+}
+
+int test_probabilistic_scores_and_sensitivity() {
+    // 1. Verificar WIS, IS80, RMSE, MAE y coberturas
+    std::vector<seird::EnsembleMetrics> ens_good(10), ens_bad(10);
+    std::vector<float> obs(10);
+    for (int t = 0; t < 10; ++t) {
+        float y = 0.05f + 0.01f * static_cast<float>(t);
+        obs[static_cast<std::size_t>(t)] = y;
+
+        ens_good[static_cast<std::size_t>(t)].i_p05 = y - 0.02f;
+        ens_good[static_cast<std::size_t>(t)].i_p10 = y - 0.015f;
+        ens_good[static_cast<std::size_t>(t)].i_p50 = y;
+        ens_good[static_cast<std::size_t>(t)].i_p90 = y + 0.015f;
+        ens_good[static_cast<std::size_t>(t)].i_p95 = y + 0.02f;
+
+        ens_bad[static_cast<std::size_t>(t)].i_p05 = y + 0.05f;
+        ens_bad[static_cast<std::size_t>(t)].i_p10 = y + 0.055f;
+        ens_bad[static_cast<std::size_t>(t)].i_p50 = y + 0.06f;
+        ens_bad[static_cast<std::size_t>(t)].i_p90 = y + 0.065f;
+        ens_bad[static_cast<std::size_t>(t)].i_p95 = y + 0.07f;
+    }
+
+    const auto sc_good = seird::compute_ensemble_forecast_scores(ens_good, obs);
+    const auto sc_bad  = seird::compute_ensemble_forecast_scores(ens_bad, obs);
+
+    ASSERT_TRUE(std::isfinite(sc_good.wis) && sc_good.wis >= 0.0f, "WIS finito y no negativo");
+    ASSERT_TRUE(sc_good.coverage_80 > 0.99f && sc_good.coverage_90 > 0.99f, "Cobertura 100% en ensamble calibrado");
+    ASSERT_TRUE(sc_bad.coverage_90 < 0.01f, "Cobertura 0% en ensamble desplazado");
+    ASSERT_TRUE(sc_good.wis < sc_bad.wis && sc_good.is80 < sc_bad.is80, "Ensamble calibrado tiene menor WIS e IS80");
+
+    // 2. Verificar barrido de sensibilidad global OpenMP
+    seird::SimParams bp;
+    const auto sweep = seird::run_global_sensitivity_sweep(
+        50000, 100, bp,
+        {0.10f, 0.30f},
+        {0.50f, 1.00f},
+        {0.00f, 0.10f},
+        40.0
+    );
+    ASSERT_TRUE(sweep.size() == 8, "Rejilla 2x2x2 debe producir 8 filas de sensibilidad");
+    ASSERT_TRUE(sweep[7].r0_ngm > sweep[0].r0_ngm, "R0 crece al aumentar beta, movilidad y superdispersores");
+
+    std::printf("[PASS] test_probabilistic_scores_and_sensitivity (WIS_good=%.4f < WIS_bad=%.4f, R0_min=%.2f, R0_max=%.2f)\n",
+                sc_good.wis, sc_bad.wis, sweep[0].r0_ngm, sweep[7].r0_ngm);
+    return 0;
+}
+
+int test_abc_smc_calibration() {
+    constexpr int N = 50000;
+    constexpr int INIT_INF = 250;
+    seird::SimParams true_p;
+    true_p.beta            = 0.28f;
+    true_p.incubation_days = 5.0f;
+    true_p.infectious_days = 10.0f;
+
+    const double beta_kin = seird::compute_abm_kinetic_beta(N, true_p);
+    const auto traj = seird::ode_seirds_simulate(N, INIT_INF, beta_kin, true_p, 30.0, true_p.dt);
+
+    std::vector<float> obs_days, obs_i;
+    for (int d = 2; d <= 30; d += 2) {
+        std::size_t idx = std::min(traj.size() - 1, static_cast<std::size_t>(std::llround(static_cast<double>(d) / true_p.dt)));
+        obs_days.push_back(static_cast<float>(d));
+        obs_i.push_back(static_cast<float>(traj[idx].i / static_cast<double>(N)));
+    }
+
+    seird::AbcSmcConfig cfg;
+    cfg.num_particles   = 48;
+    cfg.num_generations = 4;
+    cfg.obs_noise_cv    = 0.02f;
+
+    const auto res = seird::calibrate_abc_smc(N, INIT_INF, true_p, obs_days, obs_i, cfg);
+    ASSERT_TRUE(res.posterior.size() == 48, "ABC-SMC debe retornar 48 particulas posteriores");
+    ASSERT_TRUE(res.beta_p05 <= res.beta_p50 && res.beta_p50 <= res.beta_p95, "Orden de cuantiles posteriores de beta");
+    ASSERT_TRUE(std::fabs(res.beta_p50 - 0.28f) < 0.08f, "Mediana posterior de beta cercana al valor real");
+    ASSERT_TRUE(std::isfinite(res.posterior_scores.wis) && res.posterior_scores.rmse < 0.03f, "RMSE/WIS posterior acotados");
+
+    std::printf("[PASS] test_abc_smc_calibration (beta_true=0.28, post=%.3f [%.3f-%.3f], RMSE=%.4f, WIS=%.4f)\n",
+                res.beta_p50, res.beta_p05, res.beta_p95, res.posterior_scores.rmse, res.posterior_scores.wis);
+    return 0;
+}
+
 int main() {
     if (test_hardware_limits_and_domain() != 0) return 1;
     if (test_population_conservation_and_telemetry() != 0) return 1;
@@ -389,6 +506,9 @@ int main() {
     if (test_high_diffusion_abm_convergence() != 0) return 1;
     if (test_lagrangian_and_superspreaders() != 0) return 1;
     if (test_monte_carlo_ensemble() != 0) return 1;
+    if (test_urban_layout_and_family_flow() != 0) return 1;
+    if (test_probabilistic_scores_and_sensitivity() != 0) return 1;
+    if (test_abc_smc_calibration() != 0) return 1;
     std::printf("=== Todos los tests de invariantes pasaron correctamente ===\n");
     return 0;
 }

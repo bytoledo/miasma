@@ -36,7 +36,6 @@ Definido en `include/types.hpp`:
   * `.gitignore` y `git init`
   * [x] **Paso 2:** Implementar `src/cuda_engine.cu`.
   * [x] **Paso 3:** Crear `CMakeLists.txt` y `src/cpu_engine.cpp` (telemetría OpenMP, $R_t$, $Z$-score de brotes).
-* **Pendiente:**
   * [x] **Paso 4:** Implementar `src/main.cpp` (UI nativa Win32 + OpenGL y reportes).
   * [x] **Fase 0:** Límites dinámicos por VRAM (`cuda_query_hardware_limits`), escalado de dominio (`cuda_adjust_domain_for_agents`) y suite de pruebas de invariantes (`tests/test_invariants.cpp`).
   * [x] **Fase 1:** RNG *stateless* (`rand_u01`), Radix Sort acotado a bits activos, reordenamiento físico (`kernel_reorder_agents`), salto de celdas sin infectados, *stream* dedicado y *pinned memory*.
@@ -44,3 +43,15 @@ Definido en `include/types.hpp`:
   * [x] **Bloque 1:** Conteo exacto `new_exposures` (`S -> E`) en GPU, Solver ODE SEIRDS (RK4), $R_0$ por Matriz de Siguiente Generación (NGM), bootstrap OpenMP de $R_t$ (`[P5-P95]`, `P(Rt>1)`) y pruebas de convergencia analítica.
   * [x] **Bloque 2:** Movilidad Lagrangiana con ciclo diurno (`home_zone`, 8 polos orgánicos), superdispersión (`FLAG_SUPERSPREADER`), $R_0(\text{NGM})$ cinético 2D, eliminación de *spin-wait* OpenMP, hilo *Worker* CUDA desacoplado de UI Win32/OpenGL, curva `I_ODE` en gráfica y exportación reproducible CSV+JSON en `reports/`.
   * [x] **Bloque 3:** Ensambles Monte Carlo en paralelo en GPU (*single-launch multi-replica*, `K=1..32`), reducción OpenMP (`CpuEnsembleEngine`) con percentiles P5/P50/P95, $\mathbb{P}(R_t>1)$, tasa de extinción y banda sombreada P5–P95 en la gráfica.
+  * [x] **Bloque 4 (Layouts Urbanos y Flujo Familiar):**
+    * **Zonas Urbanas Tipadas (`UrbanZone`):** Hogares (residencial), Trabajos/Escuelas, Hospitales (con capacidad limitada), Comercio/Ocio y nodos de tránsito, con *presets* de ciudad (`PRESET_MONOCENTRIC`, `PRESET_POLYCENTRIC`).
+    * **Estructura Familiar y Mezcla de Grupos:** Agrupación de agentes por `home_id` (familias de 4 miembros con mezcla de `RiskGroup`) y destinos diurnos divergentes (`work_zone`).
+    * **Ciclo Día/Noche y Semanal:** Fases horarias con `dt = 1/48` días (traslado ida, día laboral/escolar, retorno, noche intrafamiliar) y diferenciación entre días laborales y fin de semana.
+    * **Atribución de Contagio (`infection_source`):** Registro del entorno donde ocurre cada infección (`Hogar`, `Trabajo`, `Tránsito`, `Hospital`, `Ocio`) y desglose porcentual en telemetría.
+    * **Intervenciones Urbanas Focalizadas:** Cierre de escuelas / *home office* (`[W]`) y aislamiento domiciliario por hogar (`[H]`) cuando un miembro presenta síntomas.
+    * **Visualización Clara en GPU (`kernel_render_urban_zones_1080p` / `kernel_render_agents_prio`):** Contornos de zonas diferenciados, iluminación día/noche, destellos breves en nuevos contagios (`S -> E`) y modo de inspección para seguir a una familia (`[P]`).
+* **Pendiente:**
+  * [x] **Bloque 5 (Consolidación Científica — Marco Teórico):**
+    * Calibración estocástica mediante **ABC-SMC** (`calibrate_abc_smc`) con muestreo secuencial paralelo en OpenMP.
+    * Métricas probabilísticas de evaluación (`compute_ensemble_forecast_scores`: **WIS**, **IS80**, **RMSE**, **MAE**, coberturas) y análisis de sensibilidad global (`run_global_sensitivity_sweep`).
+    * Alineación de telemetría operativa: uso de `new_exposures` exacto en `CpuTelemetryEngine`, categorías de decisión $\mathbb{P}(R_t>1)$ (`RtCategory`, estándar CDC CFA) y distinción explícita entre **CFR** e **IFR**.

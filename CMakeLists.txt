@@ -52,3 +52,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_invariants.cpp")
     target_link_libraries(miasma_tests PRIVATE miasma_core)
     add_test(NAME miasma_invariants COMMAND miasma_tests)
 endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scientific_benchmarks.cpp")
+    add_executable(miasma_scientific_benchmarks tests/test_scientific_benchmarks.cpp)
+    target_link_libraries(miasma_scientific_benchmarks PRIVATE miasma_core)
+endif()

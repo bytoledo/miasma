@@ -58,6 +58,30 @@ HardwareLimits cuda_query_hardware_limits(size_t reserve_vram_mb = 1024);
 // Escala dominio espacial y malla proporcionalmente para mantener densidad segura por celda
 void cuda_adjust_domain_for_agents(SimParams& params, int num_agents);
 
+// Construye un layout urbano predefinido (PRESET_ORGANIC_POLES, PRESET_MONOCENTRIC, PRESET_POLYCENTRIC)
+void cuda_build_urban_preset(SimParams& params, int preset);
+
+struct FamilyMemberInfo {
+    float   x = 0.0f, y = 0.0f;
+    float   work_x = 0.0f, work_y = 0.0f;
+    uint8_t state = STATE_S;
+    uint8_t risk_group = RISK_LOW;
+};
+
+struct FamilyTrackInfo {
+    int   home_id = -1;
+    float home_x  = 0.0f;
+    float home_y  = 0.0f;
+    int   count   = 0;
+    FamilyMemberInfo members[8]{};
+};
+
+// Selecciona el home_id del agente más cercano a (world_x, world_y) en la réplica 0
+int cuda_pick_nearest_home_id(const AgentSystemDevice& dev, float world_x, float world_y);
+
+// Obtiene posiciones actuales y destinos de los miembros de un home_id en la réplica 0
+bool cuda_get_family_track(const AgentSystemDevice& dev, const SimParams& params, int home_id, FamilyTrackInfo& out_info);
+
 struct BenchmarkResult {
     int    num_agents      = 0;
     int    steps           = 0;

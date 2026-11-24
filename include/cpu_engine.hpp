@@ -8,17 +8,29 @@
 
 namespace seird {
 
+enum RtCategory : uint8_t {
+    RT_DECLINING        = 0, // P(Rt > 1) < 10%
+    RT_LIKELY_DECLINING = 1, // 10% <= P(Rt > 1) < 25%
+    RT_UNCERTAIN        = 2, // 25% <= P(Rt > 1) <= 75%
+    RT_LIKELY_GROWING   = 3, // 75% <  P(Rt > 1) <= 90%
+    RT_GROWING          = 4  // P(Rt > 1) > 90%
+};
+
+const char* rt_category_label(RtCategory cat);
+
 struct TelemetryMetrics {
     SimStats stats;
-    float rt             = 0.0f;  // Número reproductivo efectivo R_t (puntual)
-    float rt_p05         = 0.0f;  // Percentil 5% bootstrap OpenMP de R_t
-    float rt_p95         = 0.0f;  // Percentil 95% bootstrap OpenMP de R_t
-    float prob_rt_gt_1   = 0.0f;  // Probabilidad P(R_t > 1) (estándar CDC CFA)
-    float r0_ngm         = 0.0f;  // R_0 estructural vía Matriz de Siguiente Generación (NGM)
-    float z_score        = 0.0f;  // Z-score de anomalía / brote
-    float new_cases_rate = 0.0f;  // Tasa exacta de nuevos contagios (S -> E) por día
-    float cfr            = 0.0f;  // Case Fatality Rate: D / (R + D)
-    bool  outbreak_alert = false; // true si anomalía (>2 sigma) y rt > 1.0
+    float      rt              = 0.0f;  // Número reproductivo efectivo R_t (puntual)
+    float      rt_p05          = 0.0f;  // Percentil 5% bootstrap OpenMP de R_t
+    float      rt_p95          = 0.0f;  // Percentil 95% bootstrap OpenMP de R_t
+    float      prob_rt_gt_1    = 0.0f;  // Probabilidad P(R_t > 1) (estándar CDC CFA)
+    RtCategory rt_category     = RT_UNCERTAIN; // Categoría operativa CDC CFA
+    float      r0_ngm          = 0.0f;  // R_0 estructural vía Matriz de Siguiente Generación (NGM)
+    float      z_score         = 0.0f;  // Z-score de anomalía / brote
+    float      new_cases_rate  = 0.0f;  // Tasa exacta de nuevos contagios (S -> E) por día
+    float      cfr             = 0.0f;  // Case Fatality Rate: D / (R + D)
+    float      ifr             = 0.0f;  // Infection Fatality Rate: D / total_infectados_acumulados
+    bool       outbreak_alert  = false; // true si anomalía (>2 sigma) y rt > 1.0
 };
 
 struct OdeState {
@@ -72,7 +84,8 @@ public:
 
 private:
     std::size_t window_size_;
-    uint64_t    update_count_ = 0;
+    uint64_t    update_count_  = 0;
+    uint64_t    cum_infections_ = 0;
     std::vector<SimStats>         stats_window_;
     std::vector<float>            incidence_window_;
     std::vector<TelemetryMetrics> history_;
@@ -82,7 +95,9 @@ struct EnsembleMetrics {
     int   num_replicas   = 1;
     float sim_day        = 0.0f;
     float i_p05          = 0.0f; // Fracción de infectados P5
+    float i_p10          = 0.0f; // Fracción de infectados P10
     float i_p50          = 0.0f; // Fracción de infectados Mediana (P50)
+    float i_p90          = 0.0f; // Fracción de infectados P90
     float i_p95          = 0.0f; // Fracción de infectados P95
     float rt_p05         = 0.0f;
     float rt_p50         = 0.0f;
@@ -90,6 +105,80 @@ struct EnsembleMetrics {
     float prob_rt_gt_1   = 0.0f; // Fracción empírica de réplicas con R_t > 1
     float extinction_pct = 0.0f; // % de réplicas con extinción (E + I == 0)
 };
+
+struct ForecastScoreMetrics {
+    float mae         = 0.0f; // Mean Absolute Error (P50 vs referencia)
+    float rmse        = 0.0f; // Root Mean Squared Error (P50 vs referencia)
+    float is80        = 0.0f; // Interval Score al 80% ([P10, P90])
+    float wis         = 0.0f; // Weighted Interval Score (mediana + IC80 + IC90)
+    float coverage_80 = 0.0f; // Cobertura empírica [P10, P90] en [0, 1]
+    float coverage_90 = 0.0f; // Cobertura empírica [P5, P95] en [0, 1]
+};
+
+// Evalúa la precisión puntual y probabilística de un ensamble frente a una serie observada
+ForecastScoreMetrics compute_ensemble_forecast_scores(
+    const std::vector<EnsembleMetrics>& ens_traj,
+    const std::vector<float>& obs_i_frac
+);
+
+struct SensitivityRow {
+    float beta              = 0.0f;
+    float quarantine_factor = 1.0f;
+    float superspreader_frac = 0.0f;
+    float r0_ngm            = 0.0f;
+    float peak_i_frac       = 0.0f;
+    float final_attack_rate = 0.0f;
+};
+
+// Ejecuta un barrido paramétrico global en paralelo (OpenMP) para análisis de sensibilidad e identificabilidad
+std::vector<SensitivityRow> run_global_sensitivity_sweep(
+    int num_agents,
+    int initial_infected,
+    const SimParams& base_params,
+    const std::vector<float>& betas,
+    const std::vector<float>& quar_factors,
+    const std::vector<float>& super_fracs,
+    double horizon_days = 60.0
+);
+
+struct AbcParticle {
+    float beta            = 0.25f;
+    float incubation_days = 5.0f;
+    float infectious_days = 10.0f;
+    float weight          = 1.0f;
+    float distance        = 0.0f;
+};
+
+struct AbcSmcConfig {
+    int      num_particles   = 64;
+    int      num_generations = 4;
+    float    beta_min        = 0.05f, beta_max  = 0.60f;
+    float    incub_min       = 2.0f,  incub_max = 10.0f;
+    float    infec_min       = 4.0f,  infec_max = 18.0f;
+    float    obs_noise_cv    = 0.03f;
+    uint64_t seed            = 2026ULL;
+};
+
+struct AbcSmcResult {
+    std::vector<AbcParticle> posterior;
+    float beta_p05         = 0.0f;
+    float beta_p50         = 0.0f;
+    float beta_p95         = 0.0f;
+    float incub_p50        = 0.0f;
+    float infec_p50        = 0.0f;
+    float final_epsilon    = 0.0f;
+    ForecastScoreMetrics posterior_scores{};
+};
+
+// Calibración estocástica mediante Approximate Bayesian Computation Sequential Monte Carlo (ABC-SMC)
+AbcSmcResult calibrate_abc_smc(
+    int num_agents,
+    int initial_infected,
+    const SimParams& base_params,
+    const std::vector<float>& obs_days,
+    const std::vector<float>& obs_i_frac,
+    const AbcSmcConfig& cfg = AbcSmcConfig{}
+);
 
 class CpuEnsembleEngine {
 public:

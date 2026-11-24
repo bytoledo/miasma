@@ -54,6 +54,15 @@ enum ControlId : int {
     ID_BTN_TRAILS      = 107,
     ID_BTN_EXPORT      = 108,
     ID_BTN_RINGS       = 109,
+    ID_BTN_URBAN       = 110,
+    ID_BTN_STEP1       = 111,
+    ID_BTN_HOME_QUAR   = 112,
+    ID_BTN_CLOSE_WORK  = 113,
+    ID_BTN_FOLLOW_FAM  = 114,
+    ID_TAB_CONTROL     = 115,
+    ID_TAB_PARAMS      = 116,
+    ID_TAB_VISUAL      = 117,
+    ID_BTN_MOSAIC      = 118,
     ID_TRK_QUARANTINE  = 201,
     ID_TRK_BETA        = 202,
     ID_TRK_FATALITY    = 203,
@@ -74,12 +83,18 @@ std::atomic<bool> g_running{true};
 std::atomic<bool> g_paused{false}; // Se define desde el Launcher al iniciar
 std::atomic<bool> g_reset_requested{false};
 std::atomic<bool> g_force_render{false};
+std::atomic<bool> g_single_step_requested{false};
+std::atomic<bool> g_force_ui_stats{false};
 std::atomic<bool> g_export_requested{false};
+std::atomic<bool> g_pick_family_requested{false};
+std::atomic<float> g_pick_wx{0.0f};
+std::atomic<float> g_pick_wy{0.0f};
 
 std::mutex g_state_mtx;
 int    g_substeps         = 4;    // 4 * 0.05 = 0.20 días/frame
 int    g_chart_days       = 30;   // Ventana de días en la gráfica inferior
 int    g_initial_infected = 150;  // Casos iniciales al iniciar/reiniciar
+uint64_t g_user_seed      = 42ULL; // 0 = aleatoria al reiniciar, >0 = semilla fija reproducible
 float  g_chart_scroll_day = 0.0f; // Día inicial visible al deslizar la gráfica
 bool   g_chart_autofollow = true; // Sigue automáticamente el último día
 bool   g_dragging_chart   = false;
@@ -87,7 +102,10 @@ bool   g_dragging_map     = false;
 int    g_drag_last_x      = 0;
 int    g_drag_last_y      = 0;
 int    g_win_w            = 1440;
-int    g_win_h            = 840;
+int    g_win_h            = 900;
+int    g_active_tab       = 0; // 0: Control/Ciudad, 1: Parametros, 2: Vista/Export
+bool   g_hover_chart      = false;
+float  g_hover_ndc_x      = 0.0f;
 GLuint g_gl_font_base     = 0;
 
 seird::SimParams g_params;
@@ -99,6 +117,235 @@ HWND g_btn_render_mode = nullptr;
 HWND g_btn_trails      = nullptr;
 HWND g_btn_export      = nullptr;
 HWND g_btn_rings       = nullptr;
+HWND g_btn_urban       = nullptr;
+HWND g_btn_step1       = nullptr;
+HWND g_btn_home_quar   = nullptr;
+HWND g_btn_close_work  = nullptr;
+HWND g_btn_follow_fam  = nullptr;
+HWND g_tab_control     = nullptr;
+HWND g_tab_params      = nullptr;
+HWND g_tab_visual      = nullptr;
+HWND g_lbl_help        = nullptr;
+HWND g_lbl_seed        = nullptr;
+HWND g_edt_seed        = nullptr;
+HWND g_btn_mosaic      = nullptr;
+HBRUSH g_br_panel      = nullptr;
+HBRUSH g_br_card       = nullptr;
+HFONT  g_font_ui       = nullptr;
+HFONT  g_font_mono     = nullptr;
+HICON  g_app_icon      = nullptr;
+
+void draw_miasma_logo(HDC hdc, int cx, int cy, int r) {
+    // 1. Lobulos azules superpuestos (polos S) + puntos grises (D)
+    const int lx[7] = { -55,  0,  55, -72,  72, -45,  45 };
+    const int ly[7] = { -28, -36, -28,   4,   4,  30,  30 };
+    const int lrx[7] = { 56, 52, 56, 52, 52, 58, 58 };
+    const int lry[7] = { 42, 42, 42, 38, 38, 40, 40 };
+
+    HBRUSH br_s_dark  = CreateSolidBrush(RGB(29, 126, 188));
+    HBRUSH br_s_light = CreateSolidBrush(RGB(56, 178, 240));
+    HGDIOBJ op = SelectObject(hdc, GetStockObject(NULL_PEN));
+    HGDIOBJ ob = SelectObject(hdc, br_s_dark);
+    for (int k = 0; k < 7; ++k) {
+        SelectObject(hdc, (k % 2 == 0) ? br_s_dark : br_s_light);
+        int x0 = cx + (lx[k] * r) / 100;
+        int y0 = cy + (ly[k] * r) / 100;
+        int rx = (lrx[k] * r) / 100;
+        int ry = (lry[k] * r) / 100;
+        Ellipse(hdc, x0 - rx, y0 - ry, x0 + rx, y0 + ry);
+    }
+
+    // Puntos grises (D) sobre los lobulos azules
+    HBRUSH br_d = CreateSolidBrush(RGB(100, 116, 139));
+    SelectObject(hdc, br_d);
+    const int dx[10] = { -78, -52, -10, 14, 62, 85, -88, 92, -62, 65 };
+    const int dy[10] = { -40, -28, -52, -48, -32, -24, 12, 8, 42, 38 };
+    int dr = std::max(2, r / 18);
+    for (int k = 0; k < 10; ++k) {
+        int px = cx + (dx[k] * r) / 100;
+        int py = cy + (dy[k] * r) / 100;
+        Ellipse(hdc, px - dr, py - dr, px + dr, py + dr);
+    }
+
+    // 2. Nucleo organico ondulado en 4 capas: Ambar (E) -> Rojo (I) -> Verde (R) -> Sombra interna
+    auto draw_wave_poly = [&](float scale_x, float scale_y, COLORREF col) {
+        constexpr int PTS = 64;
+        POINT pts[PTS]{};
+        for (int i = 0; i < PTS; ++i) {
+            float th = (static_cast<float>(i) / static_cast<float>(PTS)) * 6.2831853f;
+            float wob = 1.0f + 0.055f * std::cos(3.0f * th + 0.4f) + 0.035f * std::sin(5.0f * th);
+            pts[i].x = cx + static_cast<LONG>(std::cos(th) * r * 0.84f * scale_x * wob);
+            pts[i].y = cy + static_cast<LONG>(std::sin(th) * r * 0.54f * scale_y * wob);
+        }
+        HBRUSH br = CreateSolidBrush(col);
+        SelectObject(hdc, br);
+        Polygon(hdc, pts, PTS);
+        DeleteObject(br);
+    };
+
+    draw_wave_poly(1.00f, 1.00f, RGB(250, 204, 21)); // E: Ambar
+    draw_wave_poly(0.93f, 0.90f, RGB(239, 68, 68));  // I: Rojo
+    draw_wave_poly(0.86f, 0.81f, RGB(34, 197, 94));  // R: Verde
+    draw_wave_poly(0.46f, 0.45f, RGB(22, 163, 74));  // Sombra verde organica
+
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(br_s_dark);
+    DeleteObject(br_s_light);
+    DeleteObject(br_d);
+}
+
+HICON create_app_icon() {
+    constexpr int S = 32;
+    BITMAPV5HEADER bi{};
+    bi.bV5Size        = sizeof(BITMAPV5HEADER);
+    bi.bV5Width       = S;
+    bi.bV5Height      = -S;
+    bi.bV5Planes      = 1;
+    bi.bV5BitCount    = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask     = 0x00FF0000;
+    bi.bV5GreenMask   = 0x0000FF00;
+    bi.bV5BlueMask    = 0x000000FF;
+    bi.bV5AlphaMask   = 0xFF000000;
+
+    uint32_t* pixels = nullptr;
+    HDC hdc_scr = GetDC(nullptr);
+    HBITMAP hbm_color = CreateDIBSection(hdc_scr, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS,
+                                         reinterpret_cast<void**>(&pixels), nullptr, 0);
+    HBITMAP hbm_mask  = CreateBitmap(S, S, 1, 1, nullptr);
+    ReleaseDC(nullptr, hdc_scr);
+    if (!hbm_color || !hbm_mask || !pixels) {
+        if (hbm_color) DeleteObject(hbm_color);
+        if (hbm_mask)  DeleteObject(hbm_mask);
+        return nullptr;
+    }
+
+    const float c = 15.5f;
+    for (int y = 0; y < S; ++y) {
+        for (int x = 0; x < S; ++x) {
+            float dx = (static_cast<float>(x) - c) / 1.08f;
+            float dy = (static_cast<float>(y) - c) / 0.88f;
+            float ang = std::atan2(dy, dx);
+            float wobble = 1.0f + 0.10f * std::cos(5.0f * ang);
+            float d = std::sqrt(dx * dx + dy * dy) / wobble;
+
+            uint32_t col = 0x00000000u;
+            if (d <= 14.2f) {
+                col = 0xFF38BDF8u; // S: Cian exterior
+                if (d <= 10.6f) col = 0xFFFACC15u; // E: Ambar
+                if (d <= 9.2f)  col = 0xFFEF4444u; // I: Frente rojo
+                if (d <= 7.0f)  col = 0xFF22C55Eu; // R: Nucleo verde
+                if (d <= 2.4f)  col = 0xFF0F172Au; // Centro oscuro sutil
+            }
+            pixels[y * S + x] = col;
+        }
+    }
+
+    ICONINFO ii{};
+    ii.fIcon    = TRUE;
+    ii.hbmMask  = hbm_mask;
+    ii.hbmColor = hbm_color;
+    HICON icon = CreateIconIndirect(&ii);
+    DeleteObject(hbm_color);
+    DeleteObject(hbm_mask);
+    return icon;
+}
+
+struct SplashState {
+    HWND hwnd = nullptr;
+    int  progress = 0;
+    char status[128] = "Iniciando motor CUDA...";
+};
+SplashState g_splash;
+
+LRESULT CALLBACK SplashProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+
+        HBRUSH bg = CreateSolidBrush(RGB(11, 15, 25));
+        FillRect(hdc, &rc, bg);
+        DeleteObject(bg);
+
+        HPEN bdr = CreatePen(PS_SOLID, 1, RGB(51, 65, 85));
+        HGDIOBJ op = SelectObject(hdc, bdr);
+        SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        Rectangle(hdc, 0, 0, rc.right, rc.bottom);
+        SelectObject(hdc, op);
+        DeleteObject(bdr);
+
+        draw_miasma_logo(hdc, rc.right / 2, 76, 44);
+
+        SetBkMode(hdc, TRANSPARENT);
+        HFONT f_title = CreateFontA(-24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                    ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, FF_DONTCARE | DEFAULT_PITCH, "Segoe UI");
+        HFONT f_sub   = CreateFontA(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, FF_DONTCARE | DEFAULT_PITCH, "Segoe UI");
+        HGDIOBJ of = SelectObject(hdc, f_title);
+        SetTextColor(hdc, RGB(248, 250, 252));
+        RECT rt{ 0, 132, rc.right, 166 };
+        DrawTextA(hdc, "MIASMA-PARALLEL", -1, &rt, DT_CENTER | DT_SINGLELINE);
+
+        SelectObject(hdc, f_sub);
+        SetTextColor(hdc, RGB(56, 189, 248));
+        RECT rs{ 0, 166, rc.right, 190 };
+        DrawTextA(hdc, "Motor Epidemiologico Estocastico · CUDA HPC", -1, &rs, DT_CENTER | DT_SINGLELINE);
+
+        // Barra de progreso
+        int bx0 = 48, bx1 = rc.right - 48, by0 = 212, by1 = 222;
+        HBRUSH trk = CreateSolidBrush(RGB(30, 41, 59));
+        RECT r_trk{ bx0, by0, bx1, by1 };
+        FillRect(hdc, &r_trk, trk);
+        DeleteObject(trk);
+
+        int fill_w = ((bx1 - bx0) * std::clamp(g_splash.progress, 0, 100)) / 100;
+        if (fill_w > 0) {
+            HBRUSH bar = CreateSolidBrush(RGB(56, 189, 248));
+            RECT r_bar{ bx0, by0, bx0 + fill_w, by1 };
+            FillRect(hdc, &r_bar, bar);
+            DeleteObject(bar);
+        }
+
+        SetTextColor(hdc, RGB(148, 163, 184));
+        RECT rst{ 24, 232, rc.right - 24, 258 };
+        DrawTextA(hdc, g_splash.status, -1, &rst, DT_CENTER | DT_SINGLELINE);
+
+        SelectObject(hdc, of);
+        DeleteObject(f_title);
+        DeleteObject(f_sub);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+void update_splash(int pct, const char* msg) {
+    g_splash.progress = pct;
+    std::snprintf(g_splash.status, sizeof(g_splash.status), "%s", msg ? msg : "");
+    if (g_splash.hwnd) {
+        InvalidateRect(g_splash.hwnd, nullptr, FALSE);
+        UpdateWindow(g_splash.hwnd);
+    }
+}
+
+void enable_dark_title_bar(HWND hwnd) {
+    HMODULE dwm = LoadLibraryA("dwmapi.dll");
+    if (!dwm) return;
+    using PFN_DwmSetWindowAttribute = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    auto fn = reinterpret_cast<PFN_DwmSetWindowAttribute>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+    if (fn) {
+        BOOL dark = TRUE;
+        if (FAILED(fn(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark)))) {
+            fn(hwnd, 19, &dark, sizeof(dark));
+        }
+    }
+    FreeLibrary(dwm);
+}
 HWND g_lbl_quarantine  = nullptr;
 HWND g_lbl_beta        = nullptr;
 HWND g_lbl_fatality    = nullptr;
@@ -113,6 +360,8 @@ HWND g_trk_radius      = nullptr;
 HWND g_trk_substeps    = nullptr;
 HWND g_trk_chart_days  = nullptr;
 HWND g_trk_init_inf    = nullptr;
+
+uint64_t read_edit_u64(HWND h, uint64_t fallback);
 
 void update_slider_labels() {
     char buf[80];
@@ -160,6 +409,40 @@ void update_visual_buttons() {
     if (g_btn_rings) {
         SetWindowTextA(g_btn_rings, g_params.show_rings ? "Anillos: ON [A]" : "Anillos: OFF [A]");
     }
+    if (g_btn_urban) {
+        const char* u = "Ciudad: Organico [U]";
+        if (g_params.urban_preset == seird::PRESET_MONOCENTRIC) u = "Ciudad: Monocen. [U]";
+        else if (g_params.urban_preset == seird::PRESET_POLYCENTRIC) u = "Ciudad: Policen. [U]";
+        SetWindowTextA(g_btn_urban, u);
+    }
+    if (g_btn_home_quar) {
+        SetWindowTextA(g_btn_home_quar, g_params.household_quarantine ? "Q. Hogar: ON [H]" : "Q. Hogar: OFF [H]");
+    }
+    if (g_btn_close_work) {
+        SetWindowTextA(g_btn_close_work, g_params.close_schools_work ? "Cierre Trab: ON [W]" : "Cierre Trab: OFF [W]");
+    }
+    if (g_btn_follow_fam) {
+        if (g_params.selected_home_id >= 0) {
+            char fbuf[32];
+            std::snprintf(fbuf, sizeof(fbuf), "Familia #%d [P]", g_params.selected_home_id);
+            SetWindowTextA(g_btn_follow_fam, fbuf);
+        } else {
+            SetWindowTextA(g_btn_follow_fam, "Seguir Familia [P]");
+        }
+    }
+    if (g_btn_mosaic) {
+        if (g_params.num_replicas > 1) {
+            char mbuf[40];
+            if (g_params.ensemble_grid_view) {
+                std::snprintf(mbuf, sizeof(mbuf), "Mosaico K=%d: ON [G]", g_params.num_replicas);
+            } else {
+                std::snprintf(mbuf, sizeof(mbuf), "Replica #%d [G: Grid]", g_params.focused_replica);
+            }
+            SetWindowTextA(g_btn_mosaic, mbuf);
+        } else {
+            SetWindowTextA(g_btn_mosaic, "Mosaico (K=1) [G]");
+        }
+    }
 }
 
 void sync_sliders_from_params() {
@@ -173,60 +456,136 @@ void sync_sliders_from_params() {
     update_slider_labels();
 }
 
+void update_sidebar_tab_visibility() {
+    if (!g_btn_pause) return;
+    HWND parent = GetParent(g_btn_pause);
+    auto show = [&](HWND h, bool vis) {
+        if (h) ShowWindow(h, vis ? SW_SHOW : SW_HIDE);
+    };
+    const bool t0 = (g_active_tab == 0);
+    const bool t1 = (g_active_tab == 1);
+    const bool t2 = (g_active_tab == 2);
+
+    show(GetDlgItem(parent, ID_BTN_QUARANTINE), t0);
+    show(GetDlgItem(parent, ID_BTN_VACCINE),    t0);
+    show(GetDlgItem(parent, ID_BTN_NORMAL),     t0);
+    show(g_btn_urban,      t0);
+    show(g_btn_step1,      t0);
+    show(g_btn_home_quar,  t0);
+    show(g_btn_close_work, t0);
+    show(g_btn_follow_fam, t0);
+    show(g_lbl_substeps,   t0);
+    show(g_trk_substeps,   t0);
+
+    show(g_lbl_quarantine, t1); show(g_trk_quarantine, t1);
+    show(g_lbl_beta,       t1); show(g_trk_beta,       t1);
+    show(g_lbl_fatality,   t1); show(g_trk_fatality,   t1);
+    show(g_lbl_radius,     t1); show(g_trk_radius,     t1);
+    show(g_lbl_chart_days, t1); show(g_trk_chart_days, t1);
+    show(g_lbl_init_inf,   t1); show(g_trk_init_inf,   t1);
+
+    show(g_btn_render_mode, t2);
+    show(g_btn_trails,      t2);
+    show(g_btn_export,      t2);
+    show(g_btn_rings,       t2);
+    show(g_lbl_seed,        t2);
+    show(g_edt_seed,        t2);
+    show(g_btn_mosaic,      t2);
+    show(g_lbl_help,        t2);
+
+    if (g_tab_control) InvalidateRect(g_tab_control, nullptr, FALSE);
+    if (g_tab_params)  InvalidateRect(g_tab_params,  nullptr, FALSE);
+    if (g_tab_visual)  InvalidateRect(g_tab_visual,  nullptr, FALSE);
+}
+
 void layout_controls(int w, int h) {
     int gl_w = std::max(100, w - SIDEBAR_W);
     if (g_gl_hwnd) {
         MoveWindow(g_gl_hwnd, 0, 0, gl_w, h, TRUE);
         glViewport(0, 0, gl_w, h);
     }
-    // Reubicar controles del panel derecho
     int x = gl_w + 12;
     int cw = SIDEBAR_W - 24;
-    if (g_lbl_stats)      MoveWindow(g_lbl_stats,      x, 10,  cw, 232, TRUE);
-    if (g_btn_pause)      MoveWindow(g_btn_pause,      x, 248, (cw - 8) / 2, 28, TRUE);
+    if (g_lbl_stats)      MoveWindow(g_lbl_stats,      x, 10,  cw, 292, TRUE);
+    if (g_btn_pause)      MoveWindow(g_btn_pause,      x, 308, (cw - 8) / 2, 28, TRUE);
     HWND btn_reset = GetDlgItem(GetParent(g_btn_pause), ID_BTN_RESET);
-    if (btn_reset)        MoveWindow(btn_reset,        x + (cw + 8) / 2, 248, (cw - 8) / 2, 28, TRUE);
+    if (btn_reset)        MoveWindow(btn_reset,        x + (cw + 8) / 2, 308, (cw - 8) / 2, 28, TRUE);
 
+    int tw = (cw - 8) / 3;
+    if (g_tab_control) MoveWindow(g_tab_control, x,            342, tw, 25, TRUE);
+    if (g_tab_params)  MoveWindow(g_tab_params,  x + tw + 4,   342, tw, 25, TRUE);
+    if (g_tab_visual)  MoveWindow(g_tab_visual,  x + 2*(tw+4), 342, cw - 2*(tw+4), 25, TRUE);
+
+    // Tab 0: Control & Ciudad
     HWND bq = GetDlgItem(GetParent(g_btn_pause), ID_BTN_QUARANTINE);
     HWND bv = GetDlgItem(GetParent(g_btn_pause), ID_BTN_VACCINE);
     HWND bn = GetDlgItem(GetParent(g_btn_pause), ID_BTN_NORMAL);
-    if (bq) MoveWindow(bq, x, 282, cw, 25, TRUE);
-    if (bv) MoveWindow(bv, x, 310, cw, 25, TRUE);
-    if (bn) MoveWindow(bn, x, 338, cw, 25, TRUE);
-    if (g_btn_render_mode) MoveWindow(g_btn_render_mode, x, 368, (cw - 8) / 2, 25, TRUE);
-    if (g_btn_trails)      MoveWindow(g_btn_trails,      x + (cw + 8) / 2, 368, (cw - 8) / 2, 25, TRUE);
-    if (g_btn_export)      MoveWindow(g_btn_export,      x, 398, (cw - 8) / 2, 25, TRUE);
-    if (g_btn_rings)       MoveWindow(g_btn_rings,       x + (cw + 8) / 2, 398, (cw - 8) / 2, 25, TRUE);
+    if (bq) MoveWindow(bq, x, 376, cw, 26, TRUE);
+    if (bv) MoveWindow(bv, x, 406, cw, 26, TRUE);
+    if (bn) MoveWindow(bn, x, 436, cw, 26, TRUE);
+    if (g_btn_urban)       MoveWindow(g_btn_urban,       x, 468, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_step1)       MoveWindow(g_btn_step1,       x + (cw + 8) / 2, 468, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_home_quar)   MoveWindow(g_btn_home_quar,   x, 498, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_close_work)  MoveWindow(g_btn_close_work,  x + (cw + 8) / 2, 498, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_follow_fam)  MoveWindow(g_btn_follow_fam,  x, 528, cw, 26, TRUE);
+    if (g_lbl_substeps)    MoveWindow(g_lbl_substeps,    x, 564, cw, 18, TRUE);
+    if (g_trk_substeps)    MoveWindow(g_trk_substeps,    x, 582, cw, 26, TRUE);
 
-    int y = 432;
+    // Tab 1: Parametros
+    int y = 376;
     auto place_slider = [&](HWND lbl, HWND trk) {
         if (lbl) MoveWindow(lbl, x, y, cw, 18, TRUE);
         if (trk) MoveWindow(trk, x, y + 18, cw, 26, TRUE);
-        y += 48;
+        y += 50;
     };
     place_slider(g_lbl_quarantine, g_trk_quarantine);
     place_slider(g_lbl_beta,       g_trk_beta);
     place_slider(g_lbl_fatality,   g_trk_fatality);
     place_slider(g_lbl_radius,     g_trk_radius);
-    place_slider(g_lbl_substeps,   g_trk_substeps);
     place_slider(g_lbl_chart_days, g_trk_chart_days);
     place_slider(g_lbl_init_inf,   g_trk_init_inf);
+
+    // Tab 2: Vista & Export
+    if (g_btn_render_mode) MoveWindow(g_btn_render_mode, x, 376, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_trails)      MoveWindow(g_btn_trails,      x + (cw + 8) / 2, 376, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_export)      MoveWindow(g_btn_export,      x, 408, (cw - 8) / 2, 26, TRUE);
+    if (g_btn_rings)       MoveWindow(g_btn_rings,       x + (cw + 8) / 2, 408, (cw - 8) / 2, 26, TRUE);
+    if (g_lbl_seed)        MoveWindow(g_lbl_seed,        x, 444, 125, 20, TRUE);
+    if (g_edt_seed)        MoveWindow(g_edt_seed,        x + 128, 442, cw - 128, 22, TRUE);
+    if (g_btn_mosaic)      MoveWindow(g_btn_mosaic,      x, 472, cw, 26, TRUE);
+    if (g_lbl_help)        MoveWindow(g_lbl_help,        x, 504, cw, 185, TRUE);
+
+    update_sidebar_tab_visibility();
 }
 
 void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
-    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    if (!g_font_ui) {
+        g_font_ui = CreateFontA(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, FF_DONTCARE | DEFAULT_PITCH, "Segoe UI");
+    }
+    if (!g_font_mono) {
+        g_font_mono = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                  ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+    }
     auto make_ctrl = [&](const char* cls, const char* txt, DWORD style, int id) -> HWND {
-        HWND c = CreateWindowExA(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
+        DWORD actual_style = (std::strcmp(cls, "BUTTON") == 0) ? ((style & ~BS_PUSHBUTTON) | BS_OWNERDRAW) : style;
+        HWND c = CreateWindowExA(0, cls, txt, WS_CHILD | WS_VISIBLE | actual_style,
                                  0, 0, 100, 24, hwnd,
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                  hinst, nullptr);
-        SendMessageA(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageA(c, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_ui), TRUE);
         return c;
     };
 
     g_lbl_stats = make_ctrl("STATIC", "Inicializando...", SS_LEFT, 0);
+    SendMessageA(g_lbl_stats, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_mono), TRUE);
     g_btn_pause = make_ctrl("BUTTON", "Iniciar [SPACE]", BS_PUSHBUTTON, ID_BTN_PAUSE);
     make_ctrl("BUTTON", "Reiniciar [R]", BS_PUSHBUTTON, ID_BTN_RESET);
+    g_tab_control = make_ctrl("BUTTON", "1. Control", BS_PUSHBUTTON, ID_TAB_CONTROL);
+    g_tab_params  = make_ctrl("BUTTON", "2. Param.",  BS_PUSHBUTTON, ID_TAB_PARAMS);
+    g_tab_visual  = make_ctrl("BUTTON", "3. Vista",   BS_PUSHBUTTON, ID_TAB_VISUAL);
 
     make_ctrl("BUTTON", "Cuarentena Estricta [Q]", BS_PUSHBUTTON, ID_BTN_QUARANTINE);
     make_ctrl("BUTTON", "Vacunacion (beta=0.06) [V]", BS_PUSHBUTTON, ID_BTN_VACCINE);
@@ -235,6 +594,11 @@ void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
     g_btn_trails      = make_ctrl("BUTTON", "Estelas: ON [T]", BS_PUSHBUTTON, ID_BTN_TRAILS);
     g_btn_export      = make_ctrl("BUTTON", "Exportar CSV [E]", BS_PUSHBUTTON, ID_BTN_EXPORT);
     g_btn_rings       = make_ctrl("BUTTON", "Anillos: ON [A]", BS_PUSHBUTTON, ID_BTN_RINGS);
+    g_btn_urban       = make_ctrl("BUTTON", "Ciudad: Organico [U]", BS_PUSHBUTTON, ID_BTN_URBAN);
+    g_btn_step1       = make_ctrl("BUTTON", "+1 Paso [N]", BS_PUSHBUTTON, ID_BTN_STEP1);
+    g_btn_home_quar   = make_ctrl("BUTTON", "Q. Hogar: OFF [H]", BS_PUSHBUTTON, ID_BTN_HOME_QUAR);
+    g_btn_close_work  = make_ctrl("BUTTON", "Cierre Trab: OFF [W]", BS_PUSHBUTTON, ID_BTN_CLOSE_WORK);
+    g_btn_follow_fam  = make_ctrl("BUTTON", "Seguir Familia [P]", BS_PUSHBUTTON, ID_BTN_FOLLOW_FAM);
 
     g_lbl_quarantine = make_ctrl("STATIC", "Movilidad / Cuarentena", SS_LEFT, 0);
     g_trk_quarantine = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_QUARANTINE);
@@ -264,7 +628,32 @@ void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
     g_trk_init_inf = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_INIT_INF);
     SendMessageA(g_trk_init_inf, TBM_SETRANGE, TRUE, MAKELPARAM(1, 5000));
 
+    g_lbl_seed = make_ctrl("STATIC", "Seed (0=aleatoria):", SS_LEFT, 0);
+    char sbuf_init[32];
+    std::snprintf(sbuf_init, sizeof(sbuf_init), "%llu", static_cast<unsigned long long>(g_user_seed));
+    g_edt_seed = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", sbuf_init,
+                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                 0, 0, 100, 22, hwnd, nullptr, hinst, nullptr);
+    SendMessageA(g_edt_seed, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_mono), TRUE);
+    g_btn_mosaic = make_ctrl("BUTTON", "Mosaico (K=1) [G]", BS_PUSHBUTTON, ID_BTN_MOSAIC);
+
+    g_lbl_help = make_ctrl(
+        "STATIC",
+        "ATAJOS DE TECLADO Y MOUSE:\n"
+        " [SPACE] Pausar / Reanudar\n"
+        " [N / ->] Avanzar 1 paso (30m)\n"
+        " [U] Cambiar Ciudad (Org/Mono/Poli)\n"
+        " [H] Cuarentena por hogar\n"
+        " [W] Cerrar escuelas / trabajos\n"
+        " [P] Seguir familia / Clic en mapa\n"
+        " [F] Cuarentena focal (Z > 2)\n"
+        " [Rueda] Zoom | [Clic Der] Reset",
+        SS_LEFT, 0
+    );
+    SendMessageA(g_lbl_help, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_mono), TRUE);
+
     sync_sliders_from_params();
+    update_sidebar_tab_visibility();
 }
 
 void clamp_camera_locked(seird::SimParams& params) {
@@ -289,14 +678,59 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             GetClientRect(hwnd, &rc);
             int chart_top_px = static_cast<int>(static_cast<float>(rc.bottom) * 0.78f);
             float zoom = 1.0f;
+            bool is_mosaic = false;
+            int k_rep = 1;
             {
                 std::lock_guard<std::mutex> lk(g_state_mtx);
-                zoom = g_params.cam_zoom;
+                zoom      = g_params.cam_zoom;
+                k_rep     = g_params.num_replicas;
+                is_mosaic = (k_rep > 1 && g_params.ensemble_grid_view);
             }
             if (my >= chart_top_px) {
                 g_dragging_chart = true;
                 g_drag_last_x    = mx;
                 SetCapture(hwnd);
+            } else if (is_mosaic) {
+                int cols = 1, rows = 1;
+                if (k_rep == 2)       { cols = 2; rows = 1; }
+                else if (k_rep <= 4)  { cols = 2; rows = 2; }
+                else if (k_rep <= 6)  { cols = 3; rows = 2; }
+                else if (k_rep <= 8)  { cols = 4; rows = 2; }
+                else if (k_rep <= 12) { cols = 4; rows = 3; }
+                else if (k_rep <= 16) { cols = 4; rows = 4; }
+                else if (k_rep <= 24) { cols = 6; rows = 4; }
+                else if (k_rep <= 32) { cols = 8; rows = 4; }
+                else { cols = 8; rows = (k_rep + 7) / 8; }
+                int gl_w = std::max(1, static_cast<int>(rc.right));
+                int col  = std::clamp((mx * cols) / gl_w, 0, cols - 1);
+                int row  = std::clamp((my * rows) / std::max(1, chart_top_px), 0, rows - 1);
+                int r_id = row * cols + col;
+                if (r_id >= 0 && r_id < k_rep) {
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.focused_replica    = r_id;
+                        g_params.ensemble_grid_view = false;
+                    }
+                    update_visual_buttons();
+                    g_force_render.store(true);
+                    g_force_ui_stats.store(true);
+                }
+            } else if ((GetKeyState(VK_SHIFT) & 0x8000) != 0 || zoom <= 1.01f) {
+                float gl_w  = static_cast<float>(std::max(1L, rc.right));
+                float sim_h = static_cast<float>(std::max(1, chart_top_px));
+                float u = std::clamp(static_cast<float>(mx) / gl_w,  0.0f, 1.0f);
+                float v = std::clamp(static_cast<float>(my) / sim_h, 0.0f, 1.0f);
+                float wx = 0.0f, wy = 0.0f;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    float vw = g_params.world_width  / g_params.cam_zoom;
+                    float vh = g_params.world_height / g_params.cam_zoom;
+                    wx = (g_params.cam_cx - 0.5f * vw) + u * vw;
+                    wy = (g_params.cam_cy - 0.5f * vh) + v * vh;
+                }
+                g_pick_wx.store(wx);
+                g_pick_wy.store(wy);
+                g_pick_family_requested.store(true);
             } else if (zoom > 1.01f) {
                 g_dragging_map = true;
                 g_drag_last_x  = mx;
@@ -316,25 +750,29 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT tme{ sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+            int mx = static_cast<short>(LOWORD(lParam));
+            int my = static_cast<short>(HIWORD(lParam));
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            int chart_top_px = static_cast<int>(static_cast<float>(rc.bottom) * 0.78f);
+            float gl_w_f = static_cast<float>(std::max(1L, rc.right));
+            g_hover_chart = (my >= chart_top_px && my <= rc.bottom);
+            g_hover_ndc_x = -1.0f + 2.0f * (static_cast<float>(mx) / gl_w_f);
+
             if (g_dragging_chart) {
-                int mx = static_cast<short>(LOWORD(lParam));
                 int dx = mx - g_drag_last_x;
                 g_drag_last_x = mx;
-                RECT rc{};
-                GetClientRect(hwnd, &rc);
                 int gl_w = std::max(1, static_cast<int>(rc.right));
                 float days_per_px = static_cast<float>(g_chart_days) / static_cast<float>(gl_w);
                 g_chart_scroll_day -= static_cast<float>(dx) * days_per_px;
                 g_chart_autofollow = false;
             } else if (g_dragging_map) {
-                int mx = static_cast<short>(LOWORD(lParam));
-                int my = static_cast<short>(HIWORD(lParam));
                 int dx = mx - g_drag_last_x;
                 int dy = my - g_drag_last_y;
                 g_drag_last_x = mx;
                 g_drag_last_y = my;
-                RECT rc{};
-                GetClientRect(hwnd, &rc);
                 float gl_w = static_cast<float>(std::max(1L, rc.right));
                 float sim_h = static_cast<float>(std::max(1L, rc.bottom)) * 0.78f;
                 {
@@ -355,6 +793,10 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_dragging_map   = false;
                 ReleaseCapture();
             }
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            g_hover_chart = false;
             return 0;
         }
         case WM_MOUSEWHEEL: {
@@ -406,6 +848,73 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc_ctl = reinterpret_cast<HDC>(wParam);
+            HWND hctl   = reinterpret_cast<HWND>(lParam);
+            SetBkMode(hdc_ctl, OPAQUE);
+            if ((hctl == g_lbl_stats || hctl == g_lbl_help) && g_br_card) {
+                SetTextColor(hdc_ctl, RGB(226, 232, 240));
+                SetBkColor(hdc_ctl, RGB(22, 32, 50));
+                return reinterpret_cast<LRESULT>(g_br_card);
+            }
+            SetTextColor(hdc_ctl, RGB(203, 213, 225));
+            SetBkColor(hdc_ctl, RGB(15, 23, 42));
+            return reinterpret_cast<LRESULT>(g_br_panel ? g_br_panel : GetStockObject(BLACK_BRUSH));
+        }
+        case WM_CTLCOLORBTN: {
+            return reinterpret_cast<LRESULT>(g_br_panel ? g_br_panel : GetStockObject(BLACK_BRUSH));
+        }
+        case WM_DRAWITEM: {
+            const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (dis && dis->CtlType == ODT_BUTTON) {
+                char txt[96]{};
+                GetWindowTextA(dis->hwndItem, txt, sizeof(txt));
+                bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+
+                COLORREF bg = pressed ? RGB(51, 65, 85) : RGB(30, 41, 59);
+                COLORREF border = RGB(51, 65, 85);
+                if (dis->CtlID == ID_BTN_PAUSE) {
+                    bg     = g_paused.load() ? RGB(22, 163, 74) : RGB(37, 99, 235);
+                    border = g_paused.load() ? RGB(34, 197, 94) : RGB(59, 130, 246);
+                } else if (dis->CtlID == 1020) {
+                    bg     = RGB(37, 99, 235);
+                    border = RGB(59, 130, 246);
+                } else if ((dis->CtlID == ID_TAB_CONTROL && g_active_tab == 0) ||
+                           (dis->CtlID == ID_TAB_PARAMS  && g_active_tab == 1) ||
+                           (dis->CtlID == ID_TAB_VISUAL  && g_active_tab == 2)) {
+                    bg     = RGB(37, 99, 235);
+                    border = RGB(96, 165, 250);
+                } else if (std::strstr(txt, ": ON") != nullptr || std::strstr(txt, "Familia #") != nullptr) {
+                    bg     = RGB(14, 116, 144);
+                    border = RGB(34, 211, 238);
+                } else if (dis->CtlID == ID_BTN_QUARANTINE) {
+                    bg     = RGB(127, 29, 29);
+                    border = RGB(220, 38, 38);
+                } else if (dis->CtlID == ID_BTN_VACCINE) {
+                    bg     = RGB(20, 83, 45);
+                    border = RGB(34, 197, 94);
+                }
+                if (pressed) bg = RGB(71, 85, 105);
+
+                HBRUSH br  = CreateSolidBrush(bg);
+                HPEN   pen = CreatePen(PS_SOLID, 1, border);
+                HGDIOBJ old_br  = SelectObject(dis->hDC, br);
+                HGDIOBJ old_pen = SelectObject(dis->hDC, pen);
+                FillRect(dis->hDC, &dis->rcItem, g_br_panel ? g_br_panel : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 6, 6);
+                SelectObject(dis->hDC, old_br);
+                SelectObject(dis->hDC, old_pen);
+                DeleteObject(br);
+                DeleteObject(pen);
+
+                SetBkMode(dis->hDC, TRANSPARENT);
+                SetTextColor(dis->hDC, RGB(248, 250, 252));
+                RECT trc = dis->rcItem;
+                DrawTextA(dis->hDC, txt, -1, &trc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            return DefWindowProcA(hwnd, msg, wParam, lParam);
+        }
         case WM_CLOSE:
         case WM_DESTROY:
             g_running.store(false);
@@ -423,6 +932,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_paused.store(p);
                 SetWindowTextA(g_btn_pause, p ? "Reanudar [SPACE]" : "Pausar [SPACE]");
             } else if (id == ID_BTN_RESET) {
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_user_seed = read_edit_u64(g_edt_seed, g_user_seed);
+                }
                 g_reset_requested.store(true);
             } else if (id == ID_BTN_QUARANTINE) {
                 {
@@ -466,6 +979,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 {
                     std::lock_guard<std::mutex> lk(g_state_mtx);
                     g_params.show_rings = !g_params.show_rings;
+                }
+                update_visual_buttons();
+                g_force_render.store(true);
+            } else if (id == ID_BTN_URBAN) {
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    int next_preset = (g_params.urban_preset + 1) % 3;
+                    seird::cuda_build_urban_preset(g_params, next_preset);
+                    g_params.selected_home_id = -1;
+                }
+                update_visual_buttons();
+                g_reset_requested.store(true);
+            } else if (id == ID_BTN_STEP1) {
+                g_paused.store(true);
+                if (g_btn_pause) SetWindowTextA(g_btn_pause, "Reanudar [SPACE]");
+                g_single_step_requested.store(true);
+            } else if (id == ID_BTN_HOME_QUAR) {
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.household_quarantine = !g_params.household_quarantine;
+                }
+                update_visual_buttons();
+            } else if (id == ID_BTN_CLOSE_WORK) {
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.close_schools_work = !g_params.close_schools_work;
+                }
+                update_visual_buttons();
+            } else if (id == ID_BTN_FOLLOW_FAM) {
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_params.selected_home_id = (g_params.selected_home_id >= 0) ? -1 : 0;
+                }
+                update_visual_buttons();
+                g_force_render.store(true);
+            } else if (id == ID_TAB_CONTROL) {
+                g_active_tab = 0;
+                update_sidebar_tab_visibility();
+            } else if (id == ID_TAB_PARAMS) {
+                g_active_tab = 1;
+                update_sidebar_tab_visibility();
+            } else if (id == ID_TAB_VISUAL) {
+                g_active_tab = 2;
+                update_sidebar_tab_visibility();
+            } else if (id == ID_BTN_MOSAIC) {
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    if (g_params.num_replicas > 1) {
+                        g_params.ensemble_grid_view = !g_params.ensemble_grid_view;
+                    }
                 }
                 update_visual_buttons();
                 g_force_render.store(true);
@@ -551,6 +1114,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 }
                 case 'R':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_user_seed = read_edit_u64(g_edt_seed, g_user_seed);
+                    }
                     g_reset_requested.store(true);
                     break;
                 case 'Q':
@@ -614,6 +1181,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         std::lock_guard<std::mutex> lk(g_state_mtx);
                         g_params.focal_quarantine = !g_params.focal_quarantine;
                     }
+                    break;
+                case 'U':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        int next_preset = (g_params.urban_preset + 1) % 3;
+                        seird::cuda_build_urban_preset(g_params, next_preset);
+                        g_params.selected_home_id = -1;
+                    }
+                    update_visual_buttons();
+                    g_reset_requested.store(true);
+                    break;
+                case 'H':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.household_quarantine = !g_params.household_quarantine;
+                    }
+                    update_visual_buttons();
+                    break;
+                case 'W':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.close_schools_work = !g_params.close_schools_work;
+                    }
+                    update_visual_buttons();
+                    break;
+                case 'P':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        if (g_params.selected_home_id >= 0) {
+                            g_params.selected_home_id = -1;
+                        } else {
+                            g_params.selected_home_id = 0; // Resaltar familia 0 (hogar + destinos)
+                        }
+                    }
+                    update_visual_buttons();
+                    g_force_render.store(true);
+                    break;
+                case 'N':
+                case VK_RIGHT:
+                    g_paused.store(true);
+                    if (g_btn_pause) SetWindowTextA(g_btn_pause, "Reanudar [SPACE]");
+                    g_single_step_requested.store(true);
+                    break;
+                case 'G':
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        if (g_params.num_replicas > 1) {
+                            g_params.ensemble_grid_view = !g_params.ensemble_grid_view;
+                        }
+                    }
+                    update_visual_buttons();
+                    g_force_render.store(true);
                     break;
                 case VK_UP:
                 case VK_OEM_PLUS:
@@ -792,6 +1411,48 @@ void draw_epidemic_curve_overlay(
         glLineStipple(2, 0xAAAA);
         draw_series([](const HistoryPoint& p) { return p.ode_i; }, 0.95f, 0.72f, 0.90f, 1.5f);
         glDisable(GL_LINE_STIPPLE);
+
+        // Tooltip interactivo al pasar el mouse sobre la grafica
+        if (g_hover_chart && g_hover_ndc_x >= px0 && g_hover_ndc_x <= px1) {
+            float u_hov   = (g_hover_ndc_x - px0) / (px1 - px0);
+            float day_hov = t_min + u_hov * span;
+            const HistoryPoint* best_pt = nullptr;
+            float best_dt = 1e9f;
+            for (const auto& pt : hist) {
+                float d = std::fabs(pt.day - day_hov);
+                if (d < best_dt) {
+                    best_dt = d;
+                    best_pt = &pt;
+                }
+            }
+            if (best_pt) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4f(1.0f, 1.0f, 1.0f, 0.45f);
+                glLineWidth(1.0f);
+                glBegin(GL_LINES);
+                    glVertex2f(g_hover_ndc_x, py0);
+                    glVertex2f(g_hover_ndc_x, py1);
+                glEnd();
+
+                float tx = std::clamp(g_hover_ndc_x + 0.015f, px0, px1 - 0.62f);
+                glColor4f(0.04f, 0.06f, 0.11f, 0.90f);
+                glRectf(tx, py1 - 0.065f, tx + 0.61f, py1 - 0.005f);
+                glColor4f(0.35f, 0.48f, 0.68f, 0.90f);
+                glBegin(GL_LINE_LOOP);
+                    glVertex2f(tx, py1 - 0.065f); glVertex2f(tx + 0.61f, py1 - 0.065f);
+                    glVertex2f(tx + 0.61f, py1 - 0.005f); glVertex2f(tx, py1 - 0.005f);
+                glEnd();
+
+                char tbuf[96];
+                std::snprintf(tbuf, sizeof(tbuf), "D%.1f | S:%.1f%% E:%.1f%% I:%.1f%% R:%.1f%% D:%.2f%%",
+                              best_pt->day, best_pt->s * 100.0f, best_pt->e * 100.0f,
+                              best_pt->i * 100.0f, best_pt->r * 100.0f, best_pt->d * 100.0f);
+                glColor3f(0.95f, 0.97f, 1.0f);
+                draw_gl_text(tx + 0.012f, py1 - 0.045f, tbuf);
+                glDisable(GL_BLEND);
+            }
+        }
     }
 }
 
@@ -1039,6 +1700,7 @@ struct LauncherState {
     int   substeps   = 4;
     int   chart_days = 30;
     bool  start_paused = false;
+    uint64_t seed = 42ULL;
     seird::SimParams params;
 
     HWND cmb_preset   = nullptr;
@@ -1052,6 +1714,7 @@ struct LauncherState {
     HWND edt_incub    = nullptr;
     HWND edt_inf_days = nullptr;
     HWND edt_cfr      = nullptr;
+    HWND edt_seed     = nullptr;
     HWND edt_substeps = nullptr;
     HWND edt_chart    = nullptr;
     HWND cmb_view     = nullptr;
@@ -1077,8 +1740,27 @@ int read_edit_int(HWND h, int fallback, int min_v, int max_v) {
     char buf[64]{};
     GetWindowTextA(h, buf, sizeof(buf));
     try {
-        int v = std::stoi(buf);
-        return std::clamp(v, min_v, max_v);
+        std::size_t pos = 0;
+        double val = std::stod(buf, &pos);
+        while (buf[pos] == ' ' || buf[pos] == '\t') ++pos;
+        if (buf[pos] == 'k' || buf[pos] == 'K') {
+            val *= 1000.0;
+        } else if (buf[pos] == 'm' || buf[pos] == 'M') {
+            val *= 1000000.0;
+        }
+        long long iv = std::llround(val);
+        return static_cast<int>(std::clamp<long long>(iv, min_v, max_v));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+uint64_t read_edit_u64(HWND h, uint64_t fallback) {
+    if (!h) return fallback;
+    char buf[64]{};
+    GetWindowTextA(h, buf, sizeof(buf));
+    try {
+        return static_cast<uint64_t>(std::stoull(buf));
     } catch (...) {
         return fallback;
     }
@@ -1105,6 +1787,73 @@ void apply_preset_to_launcher(LauncherState* st, int idx) {
 LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     LauncherState* st = g_launcher_state;
     switch (msg) {
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc_ctl = reinterpret_cast<HDC>(wParam);
+            HWND hctl   = reinterpret_cast<HWND>(lParam);
+            SetBkMode(hdc_ctl, OPAQUE);
+            if ((hctl == g_lbl_stats || hctl == g_lbl_help) && g_br_card) {
+                SetTextColor(hdc_ctl, RGB(226, 232, 240));
+                SetBkColor(hdc_ctl, RGB(22, 32, 50));
+                return reinterpret_cast<LRESULT>(g_br_card);
+            }
+            SetTextColor(hdc_ctl, RGB(203, 213, 225));
+            SetBkColor(hdc_ctl, RGB(15, 23, 42));
+            return reinterpret_cast<LRESULT>(g_br_panel ? g_br_panel : GetStockObject(BLACK_BRUSH));
+        }
+        case WM_CTLCOLORBTN: {
+            return reinterpret_cast<LRESULT>(g_br_panel ? g_br_panel : GetStockObject(BLACK_BRUSH));
+        }
+        case WM_DRAWITEM: {
+            const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (dis && dis->CtlType == ODT_BUTTON) {
+                char txt[96]{};
+                GetWindowTextA(dis->hwndItem, txt, sizeof(txt));
+                bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+
+                COLORREF bg = pressed ? RGB(51, 65, 85) : RGB(30, 41, 59);
+                COLORREF border = RGB(51, 65, 85);
+                if (dis->CtlID == ID_BTN_PAUSE) {
+                    bg     = g_paused.load() ? RGB(22, 163, 74) : RGB(37, 99, 235);
+                    border = g_paused.load() ? RGB(34, 197, 94) : RGB(59, 130, 246);
+                } else if (dis->CtlID == 1020) {
+                    bg     = RGB(37, 99, 235);
+                    border = RGB(59, 130, 246);
+                } else if ((dis->CtlID == ID_TAB_CONTROL && g_active_tab == 0) ||
+                           (dis->CtlID == ID_TAB_PARAMS  && g_active_tab == 1) ||
+                           (dis->CtlID == ID_TAB_VISUAL  && g_active_tab == 2)) {
+                    bg     = RGB(37, 99, 235);
+                    border = RGB(96, 165, 250);
+                } else if (std::strstr(txt, ": ON") != nullptr || std::strstr(txt, "Familia #") != nullptr) {
+                    bg     = RGB(14, 116, 144);
+                    border = RGB(34, 211, 238);
+                } else if (dis->CtlID == ID_BTN_QUARANTINE) {
+                    bg     = RGB(127, 29, 29);
+                    border = RGB(220, 38, 38);
+                } else if (dis->CtlID == ID_BTN_VACCINE) {
+                    bg     = RGB(20, 83, 45);
+                    border = RGB(34, 197, 94);
+                }
+                if (pressed) bg = RGB(71, 85, 105);
+
+                HBRUSH br  = CreateSolidBrush(bg);
+                HPEN   pen = CreatePen(PS_SOLID, 1, border);
+                HGDIOBJ old_br  = SelectObject(dis->hDC, br);
+                HGDIOBJ old_pen = SelectObject(dis->hDC, pen);
+                FillRect(dis->hDC, &dis->rcItem, g_br_panel ? g_br_panel : reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 6, 6);
+                SelectObject(dis->hDC, old_br);
+                SelectObject(dis->hDC, old_pen);
+                DeleteObject(br);
+                DeleteObject(pen);
+
+                SetBkMode(dis->hDC, TRANSPARENT);
+                SetTextColor(dis->hDC, RGB(248, 250, 252));
+                RECT trc = dis->rcItem;
+                DrawTextA(dis->hDC, txt, -1, &trc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            return DefWindowProcA(hwnd, msg, wParam, lParam);
+        }
         case WM_CLOSE:
             if (st) { st->done = true; st->launch = false; }
             DestroyWindow(hwnd);
@@ -1126,6 +1875,7 @@ LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 st->params.incubation_days   = read_edit_float(st->edt_incub, 5.0f, 0.5f, 30.0f);
                 st->params.infectious_days   = read_edit_float(st->edt_inf_days, 10.0f, 0.5f, 45.0f);
                 st->params.fatality_rate     = read_edit_float(st->edt_cfr, 0.02f, 0.0f, 1.0f);
+                st->seed                     = read_edit_u64(st->edt_seed, 42ULL);
                 st->substeps   = read_edit_int(st->edt_substeps, 4, 1, 48);
                 st->chart_days = read_edit_int(st->edt_chart, 30, 2, 120);
                 st->params.render_mode   = static_cast<int>(SendMessageA(st->cmb_view, CB_GETCURSEL, 0, 0));
@@ -1133,6 +1883,8 @@ LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 constexpr int kRepChoices[] = { 1, 8, 16, 32 };
                 const int k_rep = (rep_sel >= 0 && rep_sel < 4) ? kRepChoices[rep_sel] : 1;
                 st->params.num_replicas  = k_rep;
+                st->params.ensemble_grid_view = (k_rep > 1);
+                st->params.focused_replica    = 0;
                 st->agents               = std::clamp(st->agents, 1000, std::max(1000, st->max_agents / k_rep));
                 st->infected             = std::clamp(st->infected, 1, st->agents);
                 st->params.enable_trails = (SendMessageA(st->chk_trails, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1187,11 +1939,14 @@ bool show_launcher_dialog(
     int& chart_days,
     bool& start_paused
 ) {
+    if (!g_br_panel) g_br_panel = CreateSolidBrush(RGB(15, 23, 42));
+    if (!g_br_card)  g_br_card  = CreateSolidBrush(RGB(22, 32, 50));
+
     WNDCLASSA lwc{};
     lwc.lpfnWndProc   = LauncherProc;
     lwc.hInstance     = hinst;
     lwc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    lwc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    lwc.hbrBackground = g_br_panel;
     lwc.lpszClassName = "SEIRDLauncherClass";
     RegisterClassA(&lwc);
 
@@ -1218,13 +1973,25 @@ bool show_launcher_dialog(
         sx, sy, W, H, nullptr, nullptr, hinst, nullptr
     );
     if (!lwnd) return false;
+    enable_dark_title_bar(lwnd);
+    if (g_app_icon) {
+        SendMessageA(lwnd, WM_SETICON, ICON_BIG,   reinterpret_cast<LPARAM>(g_app_icon));
+        SendMessageA(lwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_app_icon));
+    }
 
-    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    if (!g_font_ui) {
+        g_font_ui = CreateFontA(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, FF_DONTCARE | DEFAULT_PITCH, "Segoe UI");
+    }
     auto mk = [&](const char* cls, const char* txt, DWORD style, int x, int y, int w, int h, int id = 0) -> HWND {
-        HWND c = CreateWindowExA(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
+        DWORD actual_style = (std::strcmp(cls, "BUTTON") == 0 && (style & BS_AUTOCHECKBOX) == 0)
+            ? ((style & ~(BS_PUSHBUTTON | BS_DEFPUSHBUTTON)) | BS_OWNERDRAW)
+            : style;
+        HWND c = CreateWindowExA(0, cls, txt, WS_CHILD | WS_VISIBLE | actual_style,
                                  x, y, w, h, lwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                  hinst, nullptr);
-        SendMessageA(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageA(c, WM_SETFONT, reinterpret_cast<WPARAM>(g_font_ui), TRUE);
         return c;
     };
     auto mk_edit_i = [&](const char* label, int val, int x, int y) -> HWND {
@@ -1267,6 +2034,7 @@ bool show_launcher_dialog(
     st.edt_incub    = mk_edit_f("Incubacion (dias):",      st.params.incubation_days,  "%.1f", COL_L, 244);
     st.edt_inf_days = mk_edit_f("Periodo infec. (dias):",  st.params.infectious_days,  "%.1f", COL_R, 244);
     st.edt_cfr      = mk_edit_f("Letalidad CFR (0-1):",    st.params.fatality_rate,    "%.3f", COL_L, 272);
+    st.edt_seed     = mk_edit_i("Semilla (0=aleatoria):",  static_cast<int>(st.seed),  COL_R, 272);
 
     mk("STATIC", "4. Visualizacion y Tiempo:", SS_LEFT, COL_L, 312, 240, 18);
     mk("STATIC", "Modo visual inicial:", SS_LEFT, COL_L, 338, 166, 18);
@@ -1318,6 +2086,7 @@ bool show_launcher_dialog(
     substeps         = st.substeps;
     chart_days       = st.chart_days;
     start_paused     = st.start_paused;
+    g_user_seed      = st.seed;
     return true;
 }
 
@@ -1374,6 +2143,34 @@ int main(int argc, char** argv) {
     InitCommonControlsEx(&icex);
 
     HINSTANCE hinst = GetModuleHandleA(nullptr);
+    g_app_icon = create_app_icon();
+
+    // Pantalla de carga inicial (Splash Screen)
+    {
+        WNDCLASSA swc{};
+        swc.lpfnWndProc   = SplashProc;
+        swc.hInstance     = hinst;
+        swc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+        swc.lpszClassName = "SEIRDSplashClass";
+        RegisterClassA(&swc);
+        int sw = 480, sh = 276;
+        int sx = (GetSystemMetrics(SM_CXSCREEN) - sw) / 2;
+        int sy = (GetSystemMetrics(SM_CYSCREEN) - sh) / 2;
+        g_splash.hwnd = CreateWindowExA(WS_EX_TOPMOST, swc.lpszClassName, "", WS_POPUP | WS_VISIBLE,
+                                        sx, sy, sw, sh, nullptr, nullptr, hinst, nullptr);
+        update_splash(25, "Detectando GPU NVIDIA y limites de VRAM...");
+        Sleep(220);
+        const seird::HardwareLimits hw_boot = seird::cuda_query_hardware_limits();
+        char sbuf[128];
+        std::snprintf(sbuf, sizeof(sbuf), "GPU lista | VRAM libre: %zu MB | Tope seguro: %d ag.",
+                      hw_boot.vram_free_mb, hw_boot.safe_agents_limit);
+        update_splash(100, sbuf);
+        Sleep(320);
+        if (g_splash.hwnd) {
+            DestroyWindow(g_splash.hwnd);
+            g_splash.hwnd = nullptr;
+        }
+    }
 
     bool start_paused_flag = g_paused.load();
     if (!show_launcher_dialog(hinst, num_agents, g_initial_infected, g_params, g_substeps, g_chart_days, start_paused_flag)) {
@@ -1381,12 +2178,15 @@ int main(int argc, char** argv) {
     }
     g_paused.store(start_paused_flag);
 
+    if (!g_br_panel) g_br_panel = CreateSolidBrush(RGB(15, 23, 42));
+    if (!g_br_card)  g_br_card  = CreateSolidBrush(RGB(22, 32, 50));
+
     WNDCLASSA wc = {};
     wc.style         = CS_OWNDC;
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hinst;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hbrBackground = g_br_panel;
     wc.lpszClassName = "SEIRDNativeMainClass";
     if (!RegisterClassA(&wc)) return 1;
 
@@ -1406,6 +2206,11 @@ int main(int argc, char** argv) {
         nullptr, nullptr, hinst, nullptr
     );
     if (!hwnd) return 1;
+    enable_dark_title_bar(hwnd);
+    if (g_app_icon) {
+        SendMessageA(hwnd, WM_SETICON, ICON_BIG,   reinterpret_cast<LPARAM>(g_app_icon));
+        SendMessageA(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_app_icon));
+    }
 
     g_gl_hwnd = CreateWindowExA(
         0, "SEIRDGLCanvas", "",
@@ -1505,9 +2310,11 @@ int main(int argc, char** argv) {
     seird::SimStats                 pub_stats{};
     seird::TelemetryMetrics         pub_metrics{};
     seird::EnsembleMetrics          pub_ensemble{};
+    seird::FamilyTrackInfo          pub_family{};
     std::deque<HistoryPoint>        pub_curve_hist;
     std::vector<seird::TelemetryMetrics> pub_history;
     std::vector<seird::EnsembleMetrics>  pub_ens_history;
+    std::vector<seird::SimStats>         pub_rep_stats;
     double   pub_gpu_ms     = 0.0;
     uint64_t pub_seed       = 42ULL;
     int      pub_sim_frames = 0;
@@ -1535,6 +2342,12 @@ int main(int argc, char** argv) {
         std::deque<HistoryPoint> curve_hist;
         seird::OdeState ode_ref{};
         uint64_t active_seed = 42ULL;
+        {
+            std::lock_guard<std::mutex> lk(g_state_mtx);
+            active_seed = (g_user_seed > 0ULL)
+                ? g_user_seed
+                : static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        }
 
         if (!seird::cuda_init_simulation(dev, num_agents, local_init_inf, local_params, active_seed)) {
             worker_init_ok.store(false);
@@ -1613,13 +2426,38 @@ int main(int argc, char** argv) {
 
             if (g_reset_requested.exchange(false)) {
                 telemetry.reset();
-                active_seed = static_cast<uint64_t>(
-                    std::chrono::steady_clock::now().time_since_epoch().count()
-                );
+                uint64_t u_seed = 0ULL;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    u_seed = g_user_seed;
+                }
+                active_seed = (u_seed > 0ULL)
+                    ? u_seed
+                    : static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
                 int clamped_init = std::min(local_init_inf, num_agents);
                 seird::cuda_init_simulation(dev, num_agents, clamped_init, local_params, active_seed);
                 reset_host_state(clamped_init, local_params);
             }
+
+            if (g_pick_family_requested.exchange(false)) {
+                int picked = seird::cuda_pick_nearest_home_id(dev, g_pick_wx.load(), g_pick_wy.load());
+                if (picked >= 0) {
+                    {
+                        std::lock_guard<std::mutex> lk(g_state_mtx);
+                        g_params.selected_home_id = picked;
+                        local_params.selected_home_id = picked;
+                    }
+                    g_force_render.store(true);
+                    g_force_ui_stats.store(true);
+                }
+            }
+
+            seird::FamilyTrackInfo fam_info{};
+            auto update_family_pub = [&]() {
+                if (local_params.selected_home_id >= 0) {
+                    seird::cuda_get_family_track(dev, local_params, local_params.selected_home_id, fam_info);
+                }
+            };
 
             if (!g_paused.load()) {
                 auto step_t0 = std::chrono::steady_clock::now();
@@ -1673,9 +2511,11 @@ int main(int argc, char** argv) {
                     seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
                 }
                 {
+                    update_family_pub();
                     std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
                     pub_stats  = stats;
                     pub_gpu_ms = gpu_ms;
+                    pub_family = fam_info;
                     ++pub_sim_frames;
                     if (want_stats) {
                         pub_metrics     = metrics;
@@ -1683,6 +2523,7 @@ int main(int argc, char** argv) {
                         pub_curve_hist  = curve_hist;
                         pub_history     = telemetry.history();
                         pub_ens_history = ensemble.history();
+                        pub_rep_stats   = rep_stats;
                     }
                 }
                 g_frame_ready.store(true);
@@ -1696,7 +2537,68 @@ int main(int argc, char** argv) {
                     std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(target_sim_ms - step_ms));
                 }
             } else {
-                if (g_force_render.exchange(false)) {
+                if (g_single_step_requested.exchange(false)) {
+                    seird::cuda_timer_begin();
+                    const double beta_kin = seird::compute_abm_kinetic_beta(num_agents, local_params);
+                    seird::cuda_step_simulation(
+                        dev, local_params, nullptr, stats, true,
+                        (local_params.num_replicas > 1) ? &rep_stats : nullptr
+                    );
+                    ode_ref = seird::ode_seirds_step_rk4(ode_ref, beta_kin, local_params, static_cast<double>(local_params.dt));
+
+                    metrics = telemetry.update(stats, local_params);
+                    float tot = static_cast<float>(std::max(1, num_agents));
+                    float i_frac = static_cast<float>(stats.count_i) / tot;
+                    float i05 = i_frac, i50 = i_frac, i95 = i_frac;
+                    if (local_params.num_replicas > 1 && !rep_stats.empty()) {
+                        ens_metrics = ensemble.update(rep_stats, local_params, num_agents);
+                        metrics.rt_p05       = ens_metrics.rt_p05;
+                        metrics.rt_p95       = ens_metrics.rt_p95;
+                        metrics.prob_rt_gt_1 = ens_metrics.prob_rt_gt_1;
+                        i05 = ens_metrics.i_p05;
+                        i50 = ens_metrics.i_p50;
+                        i95 = ens_metrics.i_p95;
+                    }
+                    curve_hist.push_back({
+                        stats.sim_day,
+                        static_cast<float>(stats.count_s) / tot,
+                        static_cast<float>(stats.count_e) / tot,
+                        i_frac,
+                        static_cast<float>(stats.count_r) / tot,
+                        static_cast<float>(stats.count_d) / tot,
+                        static_cast<float>(ode_ref.i) / tot,
+                        i05, i50, i95
+                    });
+                    if (curve_hist.size() > 2048) curve_hist.pop_front();
+
+                    seird::cuda_render_1080p_device(dev, local_params);
+                    double gpu_ms = static_cast<double>(seird::cuda_timer_end_ms());
+                    {
+                        std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
+                        seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
+                    }
+                    {
+                        update_family_pub();
+                        std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+                        pub_stats       = stats;
+                        pub_gpu_ms      = gpu_ms;
+                        pub_family      = fam_info;
+                        pub_metrics     = metrics;
+                        pub_ensemble    = ens_metrics;
+                        pub_curve_hist  = curve_hist;
+                        pub_history     = telemetry.history();
+                        pub_ens_history = ensemble.history();
+                        pub_rep_stats   = rep_stats;
+                        ++pub_sim_frames;
+                    }
+                    g_frame_ready.store(true);
+                    g_force_ui_stats.store(true);
+                } else if (g_force_render.exchange(false)) {
+                    update_family_pub();
+                    {
+                        std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
+                        pub_family = fam_info;
+                    }
                     seird::cuda_render_1080p_device(dev, local_params);
                     {
                         std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
@@ -1724,8 +2626,11 @@ int main(int argc, char** argv) {
     seird::SimStats                 ui_stats{};
     seird::TelemetryMetrics         ui_metrics{};
     seird::EnsembleMetrics          ui_ensemble{};
+    seird::FamilyTrackInfo          ui_family{};
+    std::vector<seird::SimStats>    ui_rep_stats;
     std::deque<HistoryPoint>        ui_curve_hist;
-    double ui_gpu_ms = 0.0;
+    double   ui_gpu_ms = 0.0;
+    uint64_t ui_seed   = 42ULL;
 
     float vram_used_mb = 0.0f, vram_total_mb = 0.0f;
     seird::cuda_get_vram_info(vram_used_mb, vram_total_mb);
@@ -1810,14 +2715,19 @@ int main(int argc, char** argv) {
             ui_stats      = pub_stats;
             ui_metrics    = pub_metrics;
             ui_ensemble   = pub_ensemble;
+            ui_family     = pub_family;
+            ui_rep_stats  = pub_rep_stats;
             ui_curve_hist = pub_curve_hist;
             ui_gpu_ms     = pub_gpu_ms;
+            ui_seed       = pub_seed;
         }
 
         int rep_count_ui = 1;
+        seird::SimParams cam_snap{};
         {
             std::lock_guard<std::mutex> lk(g_state_mtx);
             rep_count_ui = g_params.num_replicas;
+            cam_snap     = g_params;
         }
 
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1833,7 +2743,207 @@ int main(int argc, char** argv) {
         glBindTexture(GL_TEXTURE_2D, 0);
         glDisable(GL_TEXTURE_2D);
 
+        const bool is_mosaic_ui = (cam_snap.num_replicas > 1 && cam_snap.ensemble_grid_view);
+        if (!is_mosaic_ui && cam_snap.selected_home_id >= 0 && ui_family.count > 0) {
+            float zoom    = std::max(1.0f, cam_snap.cam_zoom);
+            float view_w  = cam_snap.world_width  / zoom;
+            float view_h  = cam_snap.world_height / zoom;
+            float view_x0 = cam_snap.cam_cx - 0.5f * view_w;
+            float view_y0 = cam_snap.cam_cy - 0.5f * view_h;
+
+            auto to_ndc_x = [&](float wx) { return -1.0f + 2.0f * ((wx - view_x0) / view_w); };
+            auto to_ndc_y = [&](float wy) { return  1.0f - 1.56f * ((wy - view_y0) / view_h); };
+
+            float hx = to_ndc_x(ui_family.home_x);
+            float hy = to_ndc_y(ui_family.home_y);
+
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glLineWidth(1.5f);
+            glBegin(GL_LINES);
+            for (int m = 0; m < ui_family.count; ++m) {
+                const auto& mem = ui_family.members[m];
+                float mx = to_ndc_x(mem.x);
+                float my = to_ndc_y(mem.y);
+                float wx = to_ndc_x(mem.work_x);
+                float wy = to_ndc_y(mem.work_y);
+
+                // Línea hogar <-> miembro (blanco translúcido)
+                glColor4f(1.0f, 1.0f, 1.0f, 0.55f);
+                glVertex2f(hx, hy);
+                glVertex2f(mx, my);
+
+                // Línea miembro <-> trabajo/escuela (cian translúcido)
+                glColor4f(0.22f, 0.74f, 0.97f, 0.45f);
+                glVertex2f(mx, my);
+                glVertex2f(wx, wy);
+            }
+            glEnd();
+            glDisable(GL_BLEND);
+
+            char hbuf[40];
+            std::snprintf(hbuf, sizeof(hbuf), "Hogar #%d (%d)", ui_family.home_id, ui_family.count);
+            glColor3f(1.0f, 1.0f, 1.0f);
+            draw_gl_text(std::clamp(hx + 0.015f, -0.98f, 0.80f), std::clamp(hy + 0.02f, -0.52f, 0.95f), hbuf);
+        }
+
         draw_epidemic_curve_overlay(ui_curve_hist, ui_stats.sim_day, g_chart_days, rep_count_ui);
+
+        // HUD superior y leyenda compacta sobre el mapa OpenGL
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            int wd = static_cast<int>(ui_stats.sim_day);
+            int tm = static_cast<int>(std::round((ui_stats.sim_day - static_cast<float>(wd)) * 24.0f * 60.0f));
+            int hh = (tm / 60) % 24;
+            int mm = tm % 60;
+            float fh = static_cast<float>(hh) + static_cast<float>(mm) / 60.0f;
+            bool wknd = ((wd % 7) >= 5);
+            const char* ph = wknd
+                ? ((hh >= 20 || hh < 6) ? "Noche (Wknd)" : "Ocio/Hogar")
+                : ((hh >= 6 && fh < 8.5f) ? "Traslado Ida"
+                    : ((fh >= 8.5f && fh < 17.5f) ? "Dia Laboral"
+                        : ((fh >= 17.5f && hh < 20) ? "Retorno" : "Noche")));
+            const char* cname = (cam_snap.urban_preset == seird::PRESET_MONOCENTRIC)
+                ? "Monocentrica"
+                : ((cam_snap.urban_preset == seird::PRESET_POLYCENTRIC) ? "Policentrica" : "Organico");
+            bool is_night = (hh >= 20 || hh < 6);
+
+            // Caja HUD reloj (arriba izquierda en vista normal; abajo derecha en Mosaico para no tapar #0..#2)
+            float hx0 = is_mosaic_ui ?  0.22f  : -0.98f;
+            float hx1 = is_mosaic_ui ?  0.98f  : -0.26f;
+            float hy0 = is_mosaic_ui ? -0.535f :  0.89f;
+            float hy1 = is_mosaic_ui ? -0.475f :  0.97f;
+
+            glColor4f(0.04f, 0.06f, 0.11f, 0.84f);
+            glRectf(hx0, hy0, hx1, hy1);
+            glColor4f(0.20f, 0.25f, 0.35f, 0.90f);
+            glBegin(GL_LINE_LOOP);
+                glVertex2f(hx0, hy0); glVertex2f(hx1, hy0);
+                glVertex2f(hx1, hy1); glVertex2f(hx0, hy1);
+            glEnd();
+            if (is_night) glColor3f(0.38f, 0.65f, 0.98f);
+            else          glColor3f(0.98f, 0.80f, 0.08f);
+            glRectf(hx0 + 0.015f, hy0 + 0.018f, hx0 + 0.035f, hy1 - 0.018f);
+
+            char hud_clk[128];
+            if (cam_snap.num_replicas > 1 && !cam_snap.ensemble_grid_view) {
+                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | Rep #%d [G: Grid]", wd, hh, mm, cam_snap.focused_replica);
+            } else if (is_mosaic_ui) {
+                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | Mosaico K=%d (Clic: ampliar)", wd, hh, mm, cam_snap.num_replicas);
+            } else {
+                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | %s | %s", wd, hh, mm, ph, cname);
+            }
+            glColor3f(0.94f, 0.96f, 0.99f);
+            draw_gl_text(hx0 + 0.048f, hy0 + 0.020f, hud_clk);
+
+            // Etiquetas de cada replica en Vista Mosaico
+            if (is_mosaic_ui) {
+                int cols = 1, rows = 1;
+                int kr = cam_snap.num_replicas;
+                if (kr == 2)       { cols = 2; rows = 1; }
+                else if (kr <= 4)  { cols = 2; rows = 2; }
+                else if (kr <= 6)  { cols = 3; rows = 2; }
+                else if (kr <= 8)  { cols = 4; rows = 2; }
+                else if (kr <= 12) { cols = 4; rows = 3; }
+                else if (kr <= 16) { cols = 4; rows = 4; }
+                else if (kr <= 24) { cols = 6; rows = 4; }
+                else if (kr <= 32) { cols = 8; rows = 4; }
+                else { cols = 8; rows = (kr + 7) / 8; }
+                float tile_ndc_w = 2.0f / static_cast<float>(cols);
+                float tile_ndc_h = 1.56f / static_cast<float>(rows);
+                for (int r = 0; r < kr; ++r) {
+                    int col = r % cols;
+                    int row = r / cols;
+                    float tx = -1.0f + static_cast<float>(col) * tile_ndc_w + 0.012f;
+                    float ty =  1.0f - static_cast<float>(row) * tile_ndc_h - 0.048f;
+                    glColor4f(0.04f, 0.06f, 0.11f, 0.78f);
+                    glRectf(tx - 0.006f, ty - 0.010f, tx + 0.145f, ty + 0.032f);
+                    char rlbl[32];
+                    if (r < static_cast<int>(ui_rep_stats.size())) {
+                        const auto& rs = ui_rep_stats[static_cast<std::size_t>(r)];
+                        if (rs.count_e == 0 && rs.count_i == 0) {
+                            std::snprintf(rlbl, sizeof(rlbl), "#%d EXT", r);
+                            glColor3f(0.29f, 0.87f, 0.50f);
+                        } else {
+                            std::snprintf(rlbl, sizeof(rlbl), "#%d I:%u", r, rs.count_i);
+                            glColor3f(0.98f, 0.80f, 0.08f);
+                        }
+                    } else {
+                        std::snprintf(rlbl, sizeof(rlbl), "#%d", r);
+                        glColor3f(0.88f, 0.92f, 0.96f);
+                    }
+                    draw_gl_text(tx, ty, rlbl);
+                }
+            }
+
+            // Barra apilada de Origen de Contagios + Hospital (arriba derecha en modo urbano)
+            if (cam_snap.enable_urban_layout) {
+                uint32_t tot_src = ui_stats.src_home + ui_stats.src_work + ui_stats.src_transit +
+                                   ui_stats.src_hospital + ui_stats.src_leisure;
+                glColor4f(0.04f, 0.06f, 0.11f, 0.78f);
+                glRectf(0.42f, 0.84f, 0.98f, 0.97f);
+                glColor4f(0.20f, 0.25f, 0.35f, 0.90f);
+                glBegin(GL_LINE_LOOP);
+                    glVertex2f(0.42f, 0.84f); glVertex2f(0.98f, 0.84f);
+                    glVertex2f(0.98f, 0.97f); glVertex2f(0.42f, 0.97f);
+                glEnd();
+
+                float bx0 = 0.44f, bx1 = 0.96f, bw = bx1 - bx0;
+                if (tot_src > 0u) {
+                    const uint32_t vals[5] = { ui_stats.src_home, ui_stats.src_work, ui_stats.src_transit, ui_stats.src_hospital, ui_stats.src_leisure };
+                    const float cols[5][3] = {
+                        {0.29f, 0.87f, 0.50f}, {0.22f, 0.74f, 0.97f}, {0.98f, 0.80f, 0.08f},
+                        {0.97f, 0.44f, 0.44f}, {0.98f, 0.57f, 0.24f}
+                    };
+                    float cur_x = bx0;
+                    for (int k = 0; k < 5; ++k) {
+                        float frac = static_cast<float>(vals[k]) / static_cast<float>(tot_src);
+                        float seg  = frac * bw;
+                        if (seg > 0.001f) {
+                            glColor3f(cols[k][0], cols[k][1], cols[k][2]);
+                            glRectf(cur_x, 0.925f, cur_x + seg, 0.950f);
+                            cur_x += seg;
+                        }
+                    }
+                    char obuf[80];
+                    std::snprintf(obuf, sizeof(obuf), "Origen H:%.0f%% T:%.0f%% Tr:%.0f%% | Hosp:%u",
+                                  100.0f * vals[0] / tot_src, 100.0f * vals[1] / tot_src,
+                                  100.0f * vals[2] / tot_src, ui_stats.hospitalized_count);
+                    glColor3f(0.88f, 0.92f, 0.96f);
+                    draw_gl_text(0.44f, 0.865f, obuf);
+                }
+            }
+
+            // Leyenda compacta (abajo izquierda del mapa, justo sobre la grafica)
+            float ly0 = cam_snap.enable_urban_layout ? -0.535f : -0.535f;
+            float ly1 = cam_snap.enable_urban_layout ? -0.425f : -0.475f;
+            glColor4f(0.04f, 0.06f, 0.11f, 0.78f);
+            glRectf(-0.98f, ly0, 0.14f, ly1);
+            auto draw_swatch = [&](float sx, float sy, float r, float g, float b, const char* lbl) {
+                glColor3f(r, g, b);
+                glRectf(sx, sy, sx + 0.018f, sy + 0.025f);
+                glColor3f(0.88f, 0.92f, 0.96f);
+                draw_gl_text(sx + 0.024f, sy + 0.004f, lbl);
+            };
+            float row_s = cam_snap.enable_urban_layout ? -0.465f : -0.518f;
+            draw_swatch(-0.96f, row_s, 0.22f, 0.74f, 0.97f, "S");
+            draw_swatch(-0.88f, row_s, 0.98f, 0.80f, 0.08f, "E");
+            draw_swatch(-0.80f, row_s, 0.94f, 0.27f, 0.27f, "I");
+            draw_swatch(-0.72f, row_s, 0.13f, 0.77f, 0.37f, "R");
+            draw_swatch(-0.64f, row_s, 0.39f, 0.45f, 0.55f, "D");
+            if (cam_snap.enable_urban_layout) {
+                draw_swatch(-0.96f, -0.518f, 0.29f, 0.87f, 0.50f, "Hogar");
+                draw_swatch(-0.80f, -0.518f, 0.22f, 0.74f, 0.97f, "Trab");
+                draw_swatch(-0.65f, -0.518f, 0.65f, 0.55f, 0.98f, "Esc");
+                draw_swatch(-0.51f, -0.518f, 0.97f, 0.44f, 0.44f, "Hosp");
+                draw_swatch(-0.36f, -0.518f, 0.98f, 0.57f, 0.24f, "Ocio");
+                draw_swatch(-0.21f, -0.518f, 0.98f, 0.80f, 0.08f, "Trans");
+            }
+            glDisable(GL_BLEND);
+        }
+
         SwapBuffers(hdc);
 
         // Mantener UI fluida (~60 FPS) sin bloquear por substeps de CUDA
@@ -1846,7 +2956,7 @@ int main(int argc, char** argv) {
         ++ui_frame_counter;
         auto now = std::chrono::steady_clock::now();
         double elapsed_s = std::chrono::duration<double>(now - last_ui_time).count();
-        if (elapsed_s >= 0.25) {
+        if (elapsed_s >= 0.25 || g_force_ui_stats.exchange(false)) {
             int sim_frames_dt = 0;
             {
                 std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
@@ -1868,7 +2978,42 @@ int main(int argc, char** argv) {
             }
 
             int whole_days = static_cast<int>(ui_stats.sim_day);
-            int hours = static_cast<int>((ui_stats.sim_day - static_cast<float>(whole_days)) * 24.0f + 0.5f) % 24;
+            int total_mins = static_cast<int>(std::round((ui_stats.sim_day - static_cast<float>(whole_days)) * 24.0f * 60.0f));
+            int hours      = (total_mins / 60) % 24;
+            int mins       = total_mins % 60;
+            float fhours   = static_cast<float>(hours) + static_cast<float>(mins) / 60.0f;
+            bool is_wknd   = ((whole_days % 7) >= 5);
+            const char* phase_str = is_wknd
+                ? ((hours >= 20 || hours < 6) ? "Noche (Wknd)" : "Ocio/Hogar")
+                : ((hours >= 6 && fhours < 8.5f) ? "Traslado Ida"
+                    : ((fhours >= 8.5f && fhours < 17.5f) ? "Dia Laboral"
+                        : ((fhours >= 17.5f && hours < 20) ? "Retorno" : "Noche")));
+
+            const char* urban_str = (params_snap.urban_preset == seird::PRESET_MONOCENTRIC)
+                ? "Monocentrica"
+                : ((params_snap.urban_preset == seird::PRESET_POLYCENTRIC) ? "Policentrica" : "Organico");
+
+            char urban_line[160] = "";
+            if (params_snap.enable_urban_layout) {
+                uint32_t tot_src = ui_stats.src_home + ui_stats.src_work + ui_stats.src_transit +
+                                   ui_stats.src_hospital + ui_stats.src_leisure;
+                float denom = (tot_src > 0u) ? static_cast<float>(tot_src) : 1.0f;
+                std::snprintf(
+                    urban_line, sizeof(urban_line),
+                    "\nCiudad [U]: %s | %s%s\n"
+                    "Orig%% H:%.0f T:%.0f Tr:%.0f Hp:%.0f | Hosp:%u",
+                    urban_str, phase_str,
+                    params_snap.household_quarantine ? " [Q-Hog]" : (params_snap.close_schools_work ? " [Cierre]" : ""),
+                    100.0f * static_cast<float>(ui_stats.src_home) / denom,
+                    100.0f * static_cast<float>(ui_stats.src_work) / denom,
+                    100.0f * static_cast<float>(ui_stats.src_transit) / denom,
+                    100.0f * static_cast<float>(ui_stats.src_hospital) / denom,
+                    ui_stats.hospitalized_count
+                );
+            } else {
+                std::snprintf(urban_line, sizeof(urban_line), "\nCiudad [U]: %s | %s", urban_str, phase_str);
+            }
+
             const float inf_pct = (num_agents > 0)
                 ? (static_cast<float>(ui_stats.count_i) / static_cast<float>(num_agents))
                 : 0.0f;
@@ -1890,34 +3035,36 @@ int main(int argc, char** argv) {
                               ui_stats.hotspot_cells, ui_stats.max_cell_z, status_str);
             }
 
-            char stats_txt[768];
+            char stats_txt[960];
             std::snprintf(
                 stats_txt, sizeof(stats_txt),
                 "SIMULACION SEIRD | %d%s\n"
-                "Dia: %.2f (%dd %02dh) | Rt: %.2f [%.2f-%.2f]\n"
-                "P(Rt>1): %.0f%% | R0(NGM): %.2f | Inc: %.0f/d\n"
-                "%s\n"
+                "Dia: %.2f (%dd %02d:%02d) | Rt: %.2f [%.2f-%.2f]\n"
+                "P(Rt>1): %.0f%% (%s) | R0: %.2f | %.0f/d\n"
+                "%s%s\n"
                 "------------------------------\n"
                 "Susceptibles (S): %u\n"
                 "Expuestos    (E): %u\n"
                 "Infectados   (I): %u\n"
                 "Recuperados  (R): %u\n"
                 "Fallecidos   (D): %u\n"
-                "CFR: %.2f%%\n"
+                "CFR: %.2f%% | IFR: %.2f%%\n"
                 "--- TELEMETRIA GPU -----------\n"
                 "FPS: %.0f  |  GPU: %.2f ms  |  Zoom: %.1fx\n"
-                "VRAM: %.0f / %.0f MB (%.1f%%)",
+                "VRAM: %.0f / %.0f MB (%.1f%%) | Seed: %llu",
                 num_agents,
                 (params_snap.num_replicas > 1) ? " x K" : " personas",
-                ui_stats.sim_day, whole_days, hours, ui_metrics.rt, ui_metrics.rt_p05, ui_metrics.rt_p95,
-                ui_metrics.prob_rt_gt_1 * 100.0f, ui_metrics.r0_ngm, ui_metrics.new_cases_rate,
-                ens_line,
+                ui_stats.sim_day, whole_days, hours, mins, ui_metrics.rt, ui_metrics.rt_p05, ui_metrics.rt_p95,
+                ui_metrics.prob_rt_gt_1 * 100.0f, seird::rt_category_label(ui_metrics.rt_category), ui_metrics.r0_ngm, ui_metrics.new_cases_rate,
+                ens_line, urban_line,
                 ui_stats.count_s, ui_stats.count_e, ui_stats.count_i, ui_stats.count_r, ui_stats.count_d,
-                ui_metrics.cfr * 100.0f,
+                ui_metrics.cfr * 100.0f, ui_metrics.ifr * 100.0f,
                 fps, ui_gpu_ms, params_snap.cam_zoom,
-                vram_used_mb, vram_total_mb, vram_pct
+                vram_used_mb, vram_total_mb, vram_pct,
+                static_cast<unsigned long long>(ui_seed)
             );
             SetWindowTextA(g_lbl_stats, stats_txt);
+            update_visual_buttons();
             ui_frame_counter = 0;
             last_ui_time = now;
         }
@@ -1942,6 +3089,11 @@ int main(int argc, char** argv) {
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(hglrc);
     ReleaseDC(g_gl_hwnd, hdc);
+    if (g_app_icon)  { DestroyIcon(g_app_icon); g_app_icon = nullptr; }
+    if (g_br_panel)  { DeleteObject(g_br_panel); g_br_panel = nullptr; }
+    if (g_br_card)   { DeleteObject(g_br_card);  g_br_card  = nullptr; }
+    if (g_font_ui)   { DeleteObject(g_font_ui);  g_font_ui  = nullptr; }
+    if (g_font_mono) { DeleteObject(g_font_mono); g_font_mono = nullptr; }
     DestroyWindow(hwnd);
     return 0;
 }

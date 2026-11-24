@@ -59,31 +59,39 @@ OdeState ode_seirds_step_rk4(const OdeState& st, double beta_eff, const SimParam
     const double n = st.s + st.e + st.i + st.r + st.d;
     if (n <= 0.0 || dt <= 0.0) return st;
 
-    const OdeDeriv k1 = eval_seirds_deriv(st, beta_eff, params);
+    const double sigma = (params.incubation_days > 1e-4f) ? (1.0 / static_cast<double>(params.incubation_days)) : 1e4;
+    const double inv_inf = (params.infectious_days > 1e-4f) ? (1.0 / static_cast<double>(params.infectious_days)) : 1e4;
+    const double max_rate = std::max(sigma, inv_inf);
+    const int substeps = std::clamp(static_cast<int>(std::ceil(max_rate * dt / 0.5)), 1, 512);
+    const double h_dt  = dt / static_cast<double>(substeps);
 
-    auto advance = [&](const OdeDeriv& k, double h) {
-        return OdeState{
-            std::max(0.0, st.s + h * k.s),
-            std::max(0.0, st.e + h * k.e),
-            std::max(0.0, st.i + h * k.i),
-            std::max(0.0, st.r + h * k.r),
-            std::max(0.0, st.d + h * k.d),
-            st.day + h
+    OdeState curr = st;
+    for (int sub = 0; sub < substeps; ++sub) {
+        const OdeDeriv k1 = eval_seirds_deriv(curr, beta_eff, params);
+
+        auto advance = [&](const OdeDeriv& k, double h) {
+            return OdeState{
+                std::max(0.0, curr.s + h * k.s),
+                std::max(0.0, curr.e + h * k.e),
+                std::max(0.0, curr.i + h * k.i),
+                std::max(0.0, curr.r + h * k.r),
+                std::max(0.0, curr.d + h * k.d),
+                curr.day + h
+            };
         };
-    };
 
-    const OdeDeriv k2 = eval_seirds_deriv(advance(k1, 0.5 * dt), beta_eff, params);
-    const OdeDeriv k3 = eval_seirds_deriv(advance(k2, 0.5 * dt), beta_eff, params);
-    const OdeDeriv k4 = eval_seirds_deriv(advance(k3, dt),       beta_eff, params);
+        const OdeDeriv k2 = eval_seirds_deriv(advance(k1, 0.5 * h_dt), beta_eff, params);
+        const OdeDeriv k3 = eval_seirds_deriv(advance(k2, 0.5 * h_dt), beta_eff, params);
+        const OdeDeriv k4 = eval_seirds_deriv(advance(k3, h_dt),       beta_eff, params);
 
-    OdeState out;
-    out.s   = std::max(0.0, st.s + (dt / 6.0) * (k1.s + 2.0 * k2.s + 2.0 * k3.s + k4.s));
-    out.e   = std::max(0.0, st.e + (dt / 6.0) * (k1.e + 2.0 * k2.e + 2.0 * k3.e + k4.e));
-    out.i   = std::max(0.0, st.i + (dt / 6.0) * (k1.i + 2.0 * k2.i + 2.0 * k3.i + k4.i));
-    out.r   = std::max(0.0, st.r + (dt / 6.0) * (k1.r + 2.0 * k2.r + 2.0 * k3.r + k4.r));
-    out.d   = std::max(0.0, st.d + (dt / 6.0) * (k1.d + 2.0 * k2.d + 2.0 * k3.d + k4.d));
-    out.day = st.day + dt;
-    return out;
+        curr.s   = std::max(0.0, curr.s + (h_dt / 6.0) * (k1.s + 2.0 * k2.s + 2.0 * k3.s + k4.s));
+        curr.e   = std::max(0.0, curr.e + (h_dt / 6.0) * (k1.e + 2.0 * k2.e + 2.0 * k3.e + k4.e));
+        curr.i   = std::max(0.0, curr.i + (h_dt / 6.0) * (k1.i + 2.0 * k2.i + 2.0 * k3.i + k4.i));
+        curr.r   = std::max(0.0, curr.r + (h_dt / 6.0) * (k1.r + 2.0 * k2.r + 2.0 * k3.r + k4.r));
+        curr.d   = std::max(0.0, curr.d + (h_dt / 6.0) * (k1.d + 2.0 * k2.d + 2.0 * k3.d + k4.d));
+        curr.day += h_dt;
+    }
+    return curr;
 }
 
 std::vector<OdeState> ode_seirds_simulate(
@@ -201,11 +209,23 @@ double sir_analytical_final_attack_rate(double r0) {
     return std::clamp(1.0 - s, 0.0, 1.0);
 }
 
+const char* rt_category_label(RtCategory cat) {
+    switch (cat) {
+        case RT_DECLINING:        return "Declining";
+        case RT_LIKELY_DECLINING: return "Likely Declining";
+        case RT_UNCERTAIN:        return "Uncertain";
+        case RT_LIKELY_GROWING:   return "Likely Growing";
+        case RT_GROWING:          return "Growing";
+        default:                  return "Uncertain";
+    }
+}
+
 CpuTelemetryEngine::CpuTelemetryEngine(std::size_t window_size)
     : window_size_(std::max<std::size_t>(window_size, 8)) {}
 
 void CpuTelemetryEngine::reset() {
-    update_count_ = 0;
+    update_count_   = 0;
+    cum_infections_ = 0;
     stats_window_.clear();
     incidence_window_.clear();
     history_.clear();
@@ -213,6 +233,12 @@ void CpuTelemetryEngine::reset() {
 
 TelemetryMetrics CpuTelemetryEngine::update(const SimStats& stats, const SimParams& params) {
     ++update_count_;
+    if (update_count_ == 1) {
+        cum_infections_ = static_cast<uint64_t>(stats.count_e) + static_cast<uint64_t>(stats.count_i) +
+                          static_cast<uint64_t>(stats.count_d) + static_cast<uint64_t>(stats.new_exposures);
+    } else {
+        cum_infections_ += static_cast<uint64_t>(stats.new_exposures);
+    }
 
     TelemetryMetrics m;
     m.stats = stats;
@@ -346,10 +372,20 @@ TelemetryMetrics CpuTelemetryEngine::update(const SimStats& stats, const SimPara
         m.prob_rt_gt_1 = (m.rt > 1.0f) ? 1.0f : 0.0f;
     }
 
-    // Case Fatality Rate (CFR) acumulada
+    // Categoría operativa CDC CFA según P(Rt > 1)
+    if (m.prob_rt_gt_1 < 0.10f)      m.rt_category = RT_DECLINING;
+    else if (m.prob_rt_gt_1 < 0.25f) m.rt_category = RT_LIKELY_DECLINING;
+    else if (m.prob_rt_gt_1 <= 0.75f) m.rt_category = RT_UNCERTAIN;
+    else if (m.prob_rt_gt_1 <= 0.90f) m.rt_category = RT_LIKELY_GROWING;
+    else                              m.rt_category = RT_GROWING;
+
+    // Case Fatality Rate (CFR) acumulada e Infection Fatality Rate (IFR)
     const uint64_t resolved = static_cast<uint64_t>(stats.count_r) + static_cast<uint64_t>(stats.count_d);
     if (resolved > 0) {
         m.cfr = static_cast<float>(static_cast<double>(stats.count_d) / static_cast<double>(resolved));
+    }
+    if (cum_infections_ > 0) {
+        m.ifr = static_cast<float>(static_cast<double>(stats.count_d) / static_cast<double>(cum_infections_));
     }
 
     m.outbreak_alert = ((m.z_score > 2.0f) || (stats.max_cell_z > 2.0f)) && (m.rt > 1.0f);
@@ -418,7 +454,9 @@ EnsembleMetrics CpuEnsembleEngine::update(
     };
 
     em.i_p05          = pct(i_fracs, 0.05);
+    em.i_p10          = pct(i_fracs, 0.10);
     em.i_p50          = pct(i_fracs, 0.50);
+    em.i_p90          = pct(i_fracs, 0.90);
     em.i_p95          = pct(i_fracs, 0.95);
     em.rt_p05         = pct(rt_vals, 0.05);
     em.rt_p50         = pct(rt_vals, 0.50);
@@ -431,6 +469,326 @@ EnsembleMetrics CpuEnsembleEngine::update(
         history_.erase(history_.begin());
     }
     return em;
+}
+
+ForecastScoreMetrics compute_ensemble_forecast_scores(
+    const std::vector<EnsembleMetrics>& ens_traj,
+    const std::vector<float>& obs_i_frac
+) {
+    ForecastScoreMetrics out;
+    const std::size_t n = std::min(ens_traj.size(), obs_i_frac.size());
+    if (n == 0) return out;
+
+    auto interval_score = [](double l, double u, double y, double alpha) -> double {
+        double sc = (u - l);
+        if (y < l) sc += (2.0 / alpha) * (l - y);
+        else if (y > u) sc += (2.0 / alpha) * (y - u);
+        return sc;
+    };
+
+    double sum_ae   = 0.0;
+    double sum_se   = 0.0;
+    double sum_is80 = 0.0;
+    double sum_wis  = 0.0;
+    std::size_t cov80 = 0;
+    std::size_t cov90 = 0;
+
+    for (std::size_t t = 0; t < n; ++t) {
+        const double y   = static_cast<double>(obs_i_frac[t]);
+        const double med = static_cast<double>(ens_traj[t].i_p50);
+        const double l10 = static_cast<double>(ens_traj[t].i_p10);
+        const double u90 = static_cast<double>(ens_traj[t].i_p90);
+        const double l05 = static_cast<double>(ens_traj[t].i_p05);
+        const double u95 = static_cast<double>(ens_traj[t].i_p95);
+
+        const double err = std::fabs(y - med);
+        sum_ae += err;
+        sum_se += err * err;
+
+        const double is80 = interval_score(l10, u90, y, 0.20);
+        const double is90 = interval_score(l05, u95, y, 0.10);
+        sum_is80 += is80;
+        // WIS estándar con K=2 intervalos simétricos (IC80, IC90)
+        sum_wis += (0.5 * err + 0.10 * is80 + 0.05 * is90) / 2.5;
+
+        if (y >= l10 && y <= u90) ++cov80;
+        if (y >= l05 && y <= u95) ++cov90;
+    }
+
+    const double dn = static_cast<double>(n);
+    out.mae         = static_cast<float>(sum_ae / dn);
+    out.rmse        = static_cast<float>(std::sqrt(sum_se / dn));
+    out.is80        = static_cast<float>(sum_is80 / dn);
+    out.wis         = static_cast<float>(sum_wis / dn);
+    out.coverage_80 = static_cast<float>(static_cast<double>(cov80) / dn);
+    out.coverage_90 = static_cast<float>(static_cast<double>(cov90) / dn);
+    return out;
+}
+
+std::vector<SensitivityRow> run_global_sensitivity_sweep(
+    int num_agents,
+    int initial_infected,
+    const SimParams& base_params,
+    const std::vector<float>& betas,
+    const std::vector<float>& quar_factors,
+    const std::vector<float>& super_fracs,
+    double horizon_days
+) {
+    std::vector<SensitivityRow> grid;
+    for (float b : betas) {
+        for (float q : quar_factors) {
+            for (float sf : super_fracs) {
+                SensitivityRow row;
+                row.beta               = b;
+                row.quarantine_factor  = q;
+                row.superspreader_frac = sf;
+                grid.push_back(row);
+            }
+        }
+    }
+    const int total = static_cast<int>(grid.size());
+    if (total == 0 || num_agents <= 0) return grid;
+
+    #pragma omp parallel for schedule(dynamic) if(total >= 4)
+    for (int idx = 0; idx < total; ++idx) {
+        SimParams p = base_params;
+        p.beta               = grid[static_cast<std::size_t>(idx)].beta;
+        p.quarantine_factor  = grid[static_cast<std::size_t>(idx)].quarantine_factor;
+        p.superspreader_frac = grid[static_cast<std::size_t>(idx)].superspreader_frac;
+
+        const double beta_kin = compute_abm_kinetic_beta(num_agents, p);
+        const double r0       = compute_r0_ngm(num_agents, p);
+        const auto traj       = ode_seirds_simulate(
+            static_cast<double>(num_agents),
+            static_cast<double>(initial_infected),
+            beta_kin,
+            p,
+            horizon_days,
+            std::max(1e-3, static_cast<double>(p.dt))
+        );
+
+        double peak_i = 0.0;
+        for (const auto& st : traj) {
+            peak_i = std::max(peak_i, st.i);
+        }
+        const double n_pop = static_cast<double>(num_agents);
+        const double attack = (!traj.empty()) ? (1.0 - (traj.back().s / n_pop)) : 0.0;
+
+        grid[static_cast<std::size_t>(idx)].r0_ngm            = static_cast<float>(r0);
+        grid[static_cast<std::size_t>(idx)].peak_i_frac       = static_cast<float>(peak_i / n_pop);
+        grid[static_cast<std::size_t>(idx)].final_attack_rate = static_cast<float>(attack);
+    }
+    return grid;
+}
+
+AbcSmcResult calibrate_abc_smc(
+    int num_agents,
+    int initial_infected,
+    const SimParams& base_params,
+    const std::vector<float>& obs_days,
+    const std::vector<float>& obs_i_frac,
+    const AbcSmcConfig& cfg
+) {
+    AbcSmcResult res;
+    const int n_obs = static_cast<int>(std::min(obs_days.size(), obs_i_frac.size()));
+    const int Np    = std::max(8, cfg.num_particles);
+    const int Ng    = std::max(1, cfg.num_generations);
+    if (n_obs == 0 || num_agents <= 0) return res;
+
+    const double max_day = static_cast<double>(obs_days[static_cast<std::size_t>(n_obs - 1)]);
+    const double dt      = std::max(1e-3, static_cast<double>(base_params.dt));
+    const double n_pop   = static_cast<double>(num_agents);
+
+    auto u01 = [](uint64_t& s) -> double {
+        return static_cast<double>(splitmix64_next(s) >> 11) * (1.0 / 9007199254740992.0);
+    };
+    auto normal01 = [&](uint64_t& s) -> double {
+        double u1 = std::max(1e-12, u01(s));
+        double u2 = u01(s);
+        return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * PI_D * u2);
+    };
+
+    auto eval_particle = [&](float beta, float incub, float infec, uint64_t& rng, std::vector<float>* out_traj) -> float {
+        SimParams p = base_params;
+        p.beta            = beta;
+        p.incubation_days = incub;
+        p.infectious_days = infec;
+
+        const double beta_kin = compute_abm_kinetic_beta(num_agents, p);
+        const auto sim = ode_seirds_simulate(n_pop, static_cast<double>(initial_infected), beta_kin, p, max_day, dt);
+
+        double sum_se = 0.0;
+        if (out_traj) out_traj->resize(static_cast<std::size_t>(n_obs));
+        for (int t = 0; t < n_obs; ++t) {
+            const std::size_t idx = std::min(
+                sim.size() - 1,
+                static_cast<std::size_t>(std::llround(static_cast<double>(obs_days[static_cast<std::size_t>(t)]) / dt))
+            );
+            double pred = sim[idx].i / n_pop;
+            if (cfg.obs_noise_cv > 0.0f) {
+                pred = std::max(0.0, pred * (1.0 + static_cast<double>(cfg.obs_noise_cv) * normal01(rng)));
+            }
+            if (out_traj) (*out_traj)[static_cast<std::size_t>(t)] = static_cast<float>(pred);
+            const double diff = pred - static_cast<double>(obs_i_frac[static_cast<std::size_t>(t)]);
+            sum_se += diff * diff;
+        }
+        return static_cast<float>(std::sqrt(sum_se / static_cast<double>(n_obs)));
+    };
+
+    std::vector<AbcParticle> curr(static_cast<std::size_t>(Np));
+
+    // Generación 0: muestreo directo del prior uniforme
+    #pragma omp parallel for schedule(dynamic) if(Np >= 8)
+    for (int i = 0; i < Np; ++i) {
+        uint64_t rng = cfg.seed ^ (static_cast<uint64_t>(i + 1) * 0x9E3779B97F4A7C15ULL);
+        AbcParticle pt;
+        pt.beta            = cfg.beta_min  + static_cast<float>(u01(rng)) * (cfg.beta_max  - cfg.beta_min);
+        pt.incubation_days = cfg.incub_min + static_cast<float>(u01(rng)) * (cfg.incub_max - cfg.incub_min);
+        pt.infectious_days = cfg.infec_min + static_cast<float>(u01(rng)) * (cfg.infec_max - cfg.infec_min);
+        pt.weight          = 1.0f / static_cast<float>(Np);
+        pt.distance        = eval_particle(pt.beta, pt.incubation_days, pt.infectious_days, rng, nullptr);
+        curr[static_cast<std::size_t>(i)] = pt;
+    }
+
+    std::vector<float> dists(static_cast<std::size_t>(Np));
+    for (int i = 0; i < Np; ++i) dists[static_cast<std::size_t>(i)] = curr[static_cast<std::size_t>(i)].distance;
+    std::sort(dists.begin(), dists.end());
+    float epsilon = dists[static_cast<std::size_t>(Np / 2)];
+
+    // Generaciones secuenciales g = 1..Ng-1
+    for (int g = 1; g < Ng; ++g) {
+        std::vector<AbcParticle> prev = curr;
+        // Calcular dispersión empírica de la generación previa para el kernel de perturbación
+        double mean_b = 0.0, mean_e = 0.0, mean_i = 0.0;
+        for (const auto& pt : prev) {
+            mean_b += pt.weight * pt.beta;
+            mean_e += pt.weight * pt.incubation_days;
+            mean_i += pt.weight * pt.infectious_days;
+        }
+        double var_b = 1e-6, var_e = 1e-4, var_i = 1e-4;
+        for (const auto& pt : prev) {
+            var_b += pt.weight * (pt.beta - mean_b) * (pt.beta - mean_b);
+            var_e += pt.weight * (pt.incubation_days - mean_e) * (pt.incubation_days - mean_e);
+            var_i += pt.weight * (pt.infectious_days - mean_i) * (pt.infectious_days - mean_i);
+        }
+        const double sd_b = std::max(0.005, std::sqrt(2.0 * var_b));
+        const double sd_e = std::max(0.10,  std::sqrt(2.0 * var_e));
+        const double sd_i = std::max(0.15,  std::sqrt(2.0 * var_i));
+
+        std::vector<double> cdf(static_cast<std::size_t>(Np), 0.0);
+        double acc_w = 0.0;
+        for (int j = 0; j < Np; ++j) {
+            acc_w += static_cast<double>(prev[static_cast<std::size_t>(j)].weight);
+            cdf[static_cast<std::size_t>(j)] = acc_w;
+        }
+        if (acc_w > 0.0) {
+            for (double& c : cdf) c /= acc_w;
+        }
+
+        #pragma omp parallel for schedule(dynamic) if(Np >= 8)
+        for (int i = 0; i < Np; ++i) {
+            uint64_t rng = cfg.seed ^ (static_cast<uint64_t>(g * 10000 + i + 1) * 0xBF58476D1CE4E5B9ULL);
+            AbcParticle best_pt;
+            best_pt.distance = 1e9f;
+
+            constexpr int MAX_TRIES = 40;
+            for (int tr = 0; tr < MAX_TRIES; ++tr) {
+                double u = u01(rng);
+                int pidx = 0;
+                while (pidx < Np - 1 && cdf[static_cast<std::size_t>(pidx)] < u) ++pidx;
+                const AbcParticle& parent = prev[static_cast<std::size_t>(pidx)];
+
+                float nb = static_cast<float>(parent.beta + sd_b * normal01(rng));
+                float ne = static_cast<float>(parent.incubation_days + sd_e * normal01(rng));
+                float ni = static_cast<float>(parent.infectious_days + sd_i * normal01(rng));
+                if (nb < cfg.beta_min  || nb > cfg.beta_max ||
+                    ne < cfg.incub_min || ne > cfg.incub_max ||
+                    ni < cfg.infec_min || ni > cfg.infec_max) {
+                    continue;
+                }
+                float d = eval_particle(nb, ne, ni, rng, nullptr);
+                if (d < best_pt.distance) {
+                    best_pt.beta            = nb;
+                    best_pt.incubation_days = ne;
+                    best_pt.infectious_days = ni;
+                    best_pt.distance        = d;
+                }
+                if (d <= epsilon) break;
+            }
+            if (best_pt.distance >= 1e8f) {
+                best_pt = prev[static_cast<std::size_t>(i)];
+            }
+            curr[static_cast<std::size_t>(i)] = best_pt;
+        }
+
+        // Actualizar pesos SMC
+        double sum_w = 0.0;
+        for (int i = 0; i < Np; ++i) {
+            const auto& pt = curr[static_cast<std::size_t>(i)];
+            double denom = 0.0;
+            for (int j = 0; j < Np; ++j) {
+                const auto& pr = prev[static_cast<std::size_t>(j)];
+                double db = (pt.beta - pr.beta) / sd_b;
+                double de = (pt.incubation_days - pr.incubation_days) / sd_e;
+                double di = (pt.infectious_days - pr.infectious_days) / sd_i;
+                double k  = std::exp(-0.5 * (db * db + de * de + di * di));
+                denom += static_cast<double>(pr.weight) * k;
+            }
+            double w = (denom > 1e-18) ? (1.0 / denom) : 1.0;
+            curr[static_cast<std::size_t>(i)].weight = static_cast<float>(w);
+            sum_w += w;
+        }
+        if (sum_w > 0.0) {
+            for (auto& pt : curr) pt.weight = static_cast<float>(static_cast<double>(pt.weight) / sum_w);
+        }
+
+        for (int i = 0; i < Np; ++i) dists[static_cast<std::size_t>(i)] = curr[static_cast<std::size_t>(i)].distance;
+        std::sort(dists.begin(), dists.end());
+        epsilon = std::min(epsilon * 0.85f, dists[static_cast<std::size_t>(Np / 2)]);
+    }
+
+    res.posterior     = curr;
+    res.final_epsilon = epsilon;
+
+    std::vector<float> bs(static_cast<std::size_t>(Np)), es(static_cast<std::size_t>(Np)), is(static_cast<std::size_t>(Np));
+    for (int i = 0; i < Np; ++i) {
+        bs[static_cast<std::size_t>(i)] = curr[static_cast<std::size_t>(i)].beta;
+        es[static_cast<std::size_t>(i)] = curr[static_cast<std::size_t>(i)].incubation_days;
+        is[static_cast<std::size_t>(i)] = curr[static_cast<std::size_t>(i)].infectious_days;
+    }
+    std::sort(bs.begin(), bs.end());
+    std::sort(es.begin(), es.end());
+    std::sort(is.begin(), is.end());
+    res.beta_p05  = bs[static_cast<std::size_t>(0.05 * static_cast<double>(Np - 1))];
+    res.beta_p50  = bs[static_cast<std::size_t>(0.50 * static_cast<double>(Np - 1))];
+    res.beta_p95  = bs[static_cast<std::size_t>(0.95 * static_cast<double>(Np - 1))];
+    res.incub_p50 = es[static_cast<std::size_t>(0.50 * static_cast<double>(Np - 1))];
+    res.infec_p50 = is[static_cast<std::size_t>(0.50 * static_cast<double>(Np - 1))];
+
+    // Evaluar métricas probabilísticas del ensamble posterior
+    std::vector<std::vector<float>> trajs(static_cast<std::size_t>(Np));
+    for (int i = 0; i < Np; ++i) {
+        uint64_t rng = cfg.seed ^ static_cast<uint64_t>(i + 999);
+        eval_particle(curr[static_cast<std::size_t>(i)].beta,
+                      curr[static_cast<std::size_t>(i)].incubation_days,
+                      curr[static_cast<std::size_t>(i)].infectious_days,
+                      rng, &trajs[static_cast<std::size_t>(i)]);
+    }
+    std::vector<EnsembleMetrics> ens_post(static_cast<std::size_t>(n_obs));
+    for (int t = 0; t < n_obs; ++t) {
+        std::vector<float> vals(static_cast<std::size_t>(Np));
+        for (int i = 0; i < Np; ++i) vals[static_cast<std::size_t>(i)] = trajs[static_cast<std::size_t>(i)][static_cast<std::size_t>(t)];
+        std::sort(vals.begin(), vals.end());
+        auto q = [&](double p) { return vals[static_cast<std::size_t>(p * static_cast<double>(Np - 1))]; };
+        ens_post[static_cast<std::size_t>(t)].sim_day = obs_days[static_cast<std::size_t>(t)];
+        ens_post[static_cast<std::size_t>(t)].i_p05   = q(0.05);
+        ens_post[static_cast<std::size_t>(t)].i_p10   = q(0.10);
+        ens_post[static_cast<std::size_t>(t)].i_p50   = q(0.50);
+        ens_post[static_cast<std::size_t>(t)].i_p90   = q(0.90);
+        ens_post[static_cast<std::size_t>(t)].i_p95   = q(0.95);
+    }
+    res.posterior_scores = compute_ensemble_forecast_scores(ens_post, obs_i_frac);
+    return res;
 }
 
 } // namespace seird
