@@ -117,8 +117,8 @@ A 30-day headless run (`N = 250,000` agents, `I0 = 150`, `dt = 1/24` day, `720` 
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/bytoledo/miasma-parallel.git
-cd miasma-parallel
+git clone https://github.com/bytoledo/miasma.git
+cd miasma
 ```
 
 ### 2. Build the project
