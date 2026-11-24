@@ -13,47 +13,51 @@ namespace seird {
 
 namespace {
 
-constexpr int BLOCK_SIZE = 256;
-constexpr float PI_F = 3.14159265358979323846f;
+// ============================================================================
+// 1. Estado global de GPU, buffers internos y utilidades de memoria
+// ============================================================================
+
+constexpr int BLOCK_SIZE = 256;          // Hilos por bloque CUDA
+constexpr float PI_F = 3.14159265358979323846f; // Pi en precisión simple
 
 // Buffers internos en VRAM para conteo de estados, radix sort y telemetría (evita allocs por frame)
-uint32_t* g_d_counts        = nullptr; // [0..4]: S,E,I,R,D; [5]: acumulador S->E (new_exposures)
+uint32_t* g_d_counts        = nullptr; // [K*12]: conteos SEIRD, contagios S->E y orígenes
 uint32_t* g_d_cell_infected = nullptr; // [num_cells]: infectados por celda
 float*    g_d_spatial_stats = nullptr; // [0]: sum, [1]: sum_sq
 uint32_t* g_d_hotspot_out   = nullptr; // [0]: hotspot_cells, [1]: max_z_bits (uint32)
 uint32_t* g_d_fb_prio       = nullptr; // [1920*1080]: buffer de prioridad visual (atomicMax)
-uint32_t* g_d_cell_id_alt   = nullptr;
-uint32_t* g_d_agent_idx_alt = nullptr;
-float*    g_d_x_alt         = nullptr;
-float*    g_d_y_alt         = nullptr;
-float*    g_d_vx_alt        = nullptr;
-float*    g_d_vy_alt        = nullptr;
-uint8_t*  g_d_state_alt       = nullptr;
-uint8_t*  g_d_risk_alt        = nullptr;
-uint8_t*  g_d_home_zone_alt   = nullptr;
-uint8_t*  g_d_rep_id_alt      = nullptr;
-uint32_t* g_d_home_id_alt     = nullptr;
-uint8_t*  g_d_work_zone_alt   = nullptr;
-uint8_t*  g_d_inf_src_alt     = nullptr;
-float*    g_d_inf_flash_alt   = nullptr;
-uint8_t*  g_d_home_quarantine = nullptr;
-int       g_max_homes         = 0;
-uint8_t*  g_d_cell_quarantine = nullptr;
-uint64_t* g_d_pick_min        = nullptr;
-FamilyTrackInfo* g_d_family_out = nullptr;
-float*    g_d_timer_alt       = nullptr;
-void*     g_d_sort_temp       = nullptr;
-size_t    g_sort_temp_bytes   = 0;
+uint32_t* g_d_cell_id_alt   = nullptr; // Doble buffer Radix Sort: cell_id
+uint32_t* g_d_agent_idx_alt = nullptr; // Doble buffer Radix Sort: agent_idx
+float*    g_d_x_alt         = nullptr; // Buffer alterno de reordenamiento: x
+float*    g_d_y_alt         = nullptr; // Buffer alterno de reordenamiento: y
+float*    g_d_vx_alt        = nullptr; // Buffer alterno de reordenamiento: vx
+float*    g_d_vy_alt        = nullptr; // Buffer alterno de reordenamiento: vy
+uint8_t*  g_d_state_alt     = nullptr; // Buffer alterno de reordenamiento: state
+uint8_t*  g_d_risk_alt      = nullptr; // Buffer alterno de reordenamiento: risk_group
+uint8_t*  g_d_home_zone_alt = nullptr; // Buffer alterno de reordenamiento: home_zone
+uint8_t*  g_d_rep_id_alt    = nullptr; // Buffer alterno de reordenamiento: rep_id
+uint32_t* g_d_home_id_alt   = nullptr; // Buffer alterno de reordenamiento: home_id
+uint8_t*  g_d_work_zone_alt = nullptr; // Buffer alterno de reordenamiento: work_zone
+uint8_t*  g_d_inf_src_alt   = nullptr; // Buffer alterno de reordenamiento: infection_source
+float*    g_d_inf_flash_alt = nullptr; // Buffer alterno de reordenamiento: infection_flash
+uint8_t*  g_d_home_quarantine = nullptr; // Bandera por hogar (1 si tiene algún infectado)
+int       g_max_homes         = 0;       // Capacidad asignada para g_d_home_quarantine
+uint8_t*  g_d_cell_quarantine = nullptr; // Bandera por celda (1 si Z-score > 2.0)
+uint64_t* g_d_pick_min        = nullptr; // Resultado atómico (dist_bits | home_id) al clicar mapa
+FamilyTrackInfo* g_d_family_out = nullptr; // Buffer de salida para inspección familiar
+float*    g_d_timer_alt       = nullptr; // Buffer alterno de reordenamiento: state_timer
+void*     g_d_sort_temp       = nullptr; // Memoria temporal de CUB DeviceRadixSort
+size_t    g_sort_temp_bytes   = 0;       // Tamaño en bytes de g_d_sort_temp
 
-uint32_t*    g_h_counts_pinned     = nullptr;
-uint32_t*    g_h_hotspot_pinned    = nullptr;
-cudaStream_t g_sim_stream          = nullptr;
-cudaEvent_t  g_ev_timer_start      = nullptr;
-cudaEvent_t  g_ev_timer_stop       = nullptr;
-uint64_t     g_sim_seed            = 42ULL;
-uint64_t     g_sim_step            = 0ULL;
-float        g_sim_day             = 0.0f;
-float        g_last_infected_ratio = 0.0f;
+uint32_t*    g_h_counts_pinned     = nullptr; // Memoria pinned en host para conteos
+uint32_t*    g_h_hotspot_pinned    = nullptr; // Memoria pinned en host para hotspots
+cudaStream_t g_sim_stream          = nullptr; // Stream principal no bloqueante de simulación
+cudaEvent_t  g_ev_timer_start      = nullptr; // Evento inicio para cronómetro GPU
+cudaEvent_t  g_ev_timer_stop       = nullptr; // Evento fin para cronómetro GPU
+uint64_t     g_sim_seed            = 42ULL;   // Semilla RNG activa
+uint64_t     g_sim_step            = 0ULL;    // Contador de pasos ejecutados
+float        g_sim_day             = 0.0f;    // Día simulado acumulado
+float        g_last_infected_ratio = 0.0f;    // Fracción reciente de infectados (para saturación hospitalaria)
 
 constexpr int NUM_URBAN_HUBS = 8;
 constexpr int FAMILY_SIZE    = 4;
@@ -62,6 +66,7 @@ __device__ __constant__ float kHubX[NUM_URBAN_HUBS] = { 0.50f, 0.22f, 0.78f, 0.2
 __device__ __constant__ float kHubY[NUM_URBAN_HUBS] = { 0.50f, 0.26f, 0.24f, 0.74f, 0.76f, 0.18f, 0.52f, 0.50f };
 __device__ __constant__ float kHubR[NUM_URBAN_HUBS] = { 0.24f, 0.20f, 0.20f, 0.20f, 0.20f, 0.17f, 0.16f, 0.16f };
 
+// Reporta errores CUDA en stderr devolviendo false si falló la llamada
 inline bool check_cuda(cudaError_t err, const char* file, int line) {
     if (err != cudaSuccess) {
         std::fprintf(stderr, "[CUDA ERROR] %s:%d -> %s\n",
@@ -73,6 +78,29 @@ inline bool check_cuda(cudaError_t err, const char* file, int line) {
 
 #define CUDA_CHECK(call) check_cuda((call), __FILE__, __LINE__)
 
+// Reserva count elementos de tipo T en VRAM
+template <typename T>
+inline bool cuda_alloc_buf(T*& ptr, size_t count) {
+    return CUDA_CHECK(cudaMalloc(&ptr, count * sizeof(T)));
+}
+
+// Libera y pone en nullptr una lista variádica de punteros en VRAM
+template <typename T, typename... Rest>
+inline void cuda_free_ptrs(T*& first, Rest&... rest) {
+    if (first != nullptr) {
+        cudaFree(first);
+        first = nullptr;
+    }
+    if constexpr (sizeof...(rest) > 0) {
+        cuda_free_ptrs(rest...);
+    }
+}
+
+// ============================================================================
+// 2. Funciones __device__ auxiliares (RNG, geometría y zonas urbanas)
+// ============================================================================
+
+// Empaqueta componentes RGBA (8 bits c/u) en un entero uint32_t little-endian
 __device__ __forceinline__ uint32_t pack_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return (static_cast<uint32_t>(a) << 24) |
            (static_cast<uint32_t>(b) << 16) |
@@ -80,6 +108,7 @@ __device__ __forceinline__ uint32_t pack_rgba(uint8_t r, uint8_t g, uint8_t b, u
             static_cast<uint32_t>(r);
 }
 
+// RNG stateless en [0, 1) basado en SplitMix64 (determinista por paso, agente y secuencia)
 __device__ __forceinline__ float rand_u01(uint64_t seed, uint64_t step, uint32_t id, uint32_t seq) {
     uint64_t z = seed ^ (step * 0x9E3779B97F4A7C15ULL) ^ (static_cast<uint64_t>(id) << 32) ^ static_cast<uint64_t>(seq);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -89,6 +118,7 @@ __device__ __forceinline__ float rand_u01(uint64_t seed, uint64_t step, uint32_t
     return static_cast<float>(bits >> 8) * (1.0f / 16777216.0f);
 }
 
+// Calcula la posición fija de un hogar dentro de su distrito residencial
 __device__ __forceinline__ void get_family_home_pos(
     const SimParams& params,
     uint64_t r_seed,
@@ -110,6 +140,7 @@ __device__ __forceinline__ void get_family_home_pos(
     out_hy = fminf(fmaxf(hz.cy + uy, 2.0f), params.world_height - 2.0f);
 }
 
+// Calcula una posición objetivo dentro de la zona urbana asignada al agente
 __device__ __forceinline__ void get_agent_zone_pos(
     const SimParams& params,
     uint64_t r_seed,
@@ -131,6 +162,7 @@ __device__ __forceinline__ void get_agent_zone_pos(
     out_ty = fminf(fmaxf(uz.cy + uy, 2.0f), params.world_height - 2.0f);
 }
 
+// Devuelve el índice de la k-ésima zona de tipo ztype (módulo total disponible)
 __device__ __forceinline__ int find_zone_by_type(
     const SimParams& params,
     ZoneType ztype,
@@ -154,6 +186,7 @@ __device__ __forceinline__ int find_zone_by_type(
     return -1;
 }
 
+// Devuelve el índice de la zona de tipo ztype más cercana a (px, py)
 __device__ __forceinline__ int find_nearest_zone_by_type(
     const SimParams& params,
     ZoneType ztype,
@@ -176,6 +209,11 @@ __device__ __forceinline__ int find_nearest_zone_by_type(
     return best;
 }
 
+// ============================================================================
+// 3. Kernels de inicialización y Spatial Hashing
+// ============================================================================
+
+// Inicializa posiciones, familias, grupos de riesgo y pacientes cero por réplica
 __global__ void kernel_init_agents(
     int total_agents,
     int agents_per_replica,
@@ -307,6 +345,7 @@ __global__ void kernel_init_agents(
     }
 }
 
+// Reordena los arreglos SoA según agent_idx tras el Radix Sort por celda
 __global__ void kernel_reorder_agents(
     int num_agents,
     const uint32_t* __restrict__ agent_idx,
@@ -356,6 +395,11 @@ __global__ void kernel_reorder_agents(
     inf_flash_out[i] = inf_flash_in[src];
 }
 
+// ============================================================================
+// 4. Kernels de dinámica (cuarentena, movimiento y transición SEIRD)
+// ============================================================================
+
+// Marca en cuarentena domiciliaria a los hogares con al menos un infectado
 __global__ void kernel_mark_home_quarantine(
     int num_agents,
     int max_homes,
@@ -373,6 +417,7 @@ __global__ void kernel_mark_home_quarantine(
     }
 }
 
+// Integra cinemática (rutina urbana / polos / cuarentena) y calcula cell_id para Spatial Hashing
 __global__ void kernel_move_and_hash(
     int num_agents,
     int cells_per_replica,
@@ -604,6 +649,7 @@ __global__ void kernel_move_and_hash(
     agent_idx[i] = static_cast<uint32_t>(i);
 }
 
+// Determina el rango [cell_start, cell_end) de agentes en cada celda ordenada
 __global__ void kernel_find_cell_bounds(
     int num_agents,
     const uint32_t* __restrict__ cell_id,
@@ -636,6 +682,7 @@ __global__ void kernel_find_cell_bounds(
     }
 }
 
+// Clasifica el origen espacial de un contagio según la zona urbana o cercanía al hogar
 __device__ __forceinline__ uint8_t classify_infection_source(
     const SimParams& params,
     float px,
@@ -658,6 +705,7 @@ __device__ __forceinline__ uint8_t classify_infection_source(
     return best_src;
 }
 
+// Evalúa contagios S->E en vecindario 3x3 de celdas y transiciones E->I->R/D->S
 __global__ void kernel_seir_step(
     int num_agents,
     int cells_per_replica,
@@ -826,6 +874,11 @@ __global__ void kernel_seir_step(
     }
 }
 
+// ============================================================================
+// 5. Kernels de renderizado 1080p (heatmap, zonas urbanas, agentes, compositing)
+// ============================================================================
+
+// Limpia el framebuffer o atenúa el cuadro previo para generar estelas
 __global__ void kernel_prepare_framebuffer(uint32_t* __restrict__ fb, int num_pixels, bool enable_trails) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_pixels) return;
@@ -848,6 +901,7 @@ __global__ void kernel_prepare_framebuffer(uint32_t* __restrict__ fb, int num_pi
     fb[idx] = pack_rgba(static_cast<uint8_t>(nr), static_cast<uint8_t>(ng), static_cast<uint8_t>(nb), 255);
 }
 
+// Mapea densidad normalizada t in [0, 1] a una paleta térmica RGB
 __device__ __forceinline__ void thermal_palette(float t, uint8_t& r, uint8_t& g, uint8_t& b) {
     t = fminf(fmaxf(t, 0.0f), 1.0f);
     // Paleta térmica estilo Inferno/Magma: #0B0F19 -> Púrpura -> Naranja -> Amarillo brillante
@@ -869,6 +923,7 @@ __device__ __forceinline__ void thermal_palette(float t, uint8_t& r, uint8_t& g,
     }
 }
 
+// Dibuja el mapa de calor bilineal de densidad de infectados y hotspots (Z > 2)
 __global__ void kernel_render_heatmap_1080p(
     SimParams params,
     const uint32_t* __restrict__ cell_infected,
@@ -949,20 +1004,7 @@ __global__ void kernel_render_heatmap_1080p(
     fb[idx] = pack_rgba(hr, hg, hb, 255);
 }
 
-__device__ __host__ __forceinline__ void compute_mosaic_grid(int k, int& cols, int& rows) {
-    if (k <= 1)       { cols = 1; rows = 1; return; }
-    if (k == 2)       { cols = 2; rows = 1; return; }
-    if (k <= 4)       { cols = 2; rows = 2; return; }
-    if (k <= 6)       { cols = 3; rows = 2; return; }
-    if (k <= 8)       { cols = 4; rows = 2; return; }
-    if (k <= 12)      { cols = 4; rows = 3; return; }
-    if (k <= 16)      { cols = 4; rows = 4; return; }
-    if (k <= 24)      { cols = 6; rows = 4; return; }
-    if (k <= 32)      { cols = 8; rows = 4; return; }
-    cols = 8;
-    rows = (k + 7) / 8;
-}
-
+// Dibuja distritos urbanos, iluminación día/noche y cuadrícula del modo mosaico
 __global__ void kernel_render_urban_zones_1080p(
     SimParams params,
     int num_replicas,
@@ -1080,6 +1122,7 @@ __global__ void kernel_render_urban_zones_1080p(
     );
 }
 
+// Proyecta cada agente en 1080p resolviendo solapamiento por prioridad visual (atomicMax)
 __global__ void kernel_render_agents_prio(
     int num_agents,
     int num_replicas,
@@ -1242,6 +1285,7 @@ __global__ void kernel_render_agents_prio(
     }
 }
 
+// Compone el buffer de prioridad sobre el framebuffer final 1080p
 __global__ void kernel_composite_prio(uint32_t* __restrict__ fb, const uint32_t* __restrict__ fb_prio, int num_pixels) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_pixels) return;
@@ -1252,6 +1296,11 @@ __global__ void kernel_composite_prio(uint32_t* __restrict__ fb, const uint32_t*
     }
 }
 
+// ============================================================================
+// 6. Kernels de telemetría e inspección familiar
+// ============================================================================
+
+// Acumula conteos SEIRD, orígenes de contagio y hospitalizados por réplica
 __global__ void kernel_count_states(
     int num_agents,
     int num_replicas,
@@ -1310,6 +1359,7 @@ __global__ void kernel_count_states(
     }
 }
 
+// Cuenta infectados por celda y acumula suma y suma de cuadrados espaciales
 __global__ void kernel_cell_infected_stats(
     int num_cells,
     const int* __restrict__ cell_start,
@@ -1360,6 +1410,7 @@ __global__ void kernel_cell_infected_stats(
     }
 }
 
+// Calcula Z-score por celda, cuenta hotspots y activa cuarentena focal (Z > 2.0)
 __global__ void kernel_cell_zscore(
     int num_cells,
     const uint32_t* __restrict__ cell_infected,
@@ -1400,6 +1451,10 @@ __global__ void kernel_cell_zscore(
 
 } // namespace
 
+// ============================================================================
+// 7. API pública: inicialización, paso de simulación, render y consultas
+// ============================================================================
+
 bool cuda_init_simulation(
     AgentSystemDevice& dev,
     int agents_per_replica,
@@ -1430,61 +1485,42 @@ bool cuda_init_simulation(
     g_last_infected_ratio  = (agents_per_replica > 0)
         ? (static_cast<float>(initial_infected) / static_cast<float>(agents_per_replica))
         : 0.0f;
+    g_max_homes = total_agents + 1;
 
-    const size_t float_bytes = static_cast<size_t>(total_agents) * sizeof(float);
-    const size_t u8_bytes    = static_cast<size_t>(total_agents) * sizeof(uint8_t);
-    const size_t u32_bytes   = static_cast<size_t>(total_agents) * sizeof(uint32_t);
-    const size_t cell_bytes  = static_cast<size_t>(total_cells) * sizeof(int);
-    const size_t fb_bytes    = static_cast<size_t>(FRAME_WIDTH) * FRAME_HEIGHT * 4 * sizeof(uint8_t);
+    const size_t n_ag  = static_cast<size_t>(total_agents);
+    const size_t n_cel = static_cast<size_t>(total_cells);
+    const size_t n_px  = static_cast<size_t>(FRAME_WIDTH) * FRAME_HEIGHT;
 
     bool ok = true;
     ok &= CUDA_CHECK(cudaStreamCreateWithFlags(&g_sim_stream, cudaStreamNonBlocking));
     ok &= CUDA_CHECK(cudaEventCreate(&g_ev_timer_start));
     ok &= CUDA_CHECK(cudaEventCreate(&g_ev_timer_stop));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.x, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.y, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.vx, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.vy, float_bytes));
 
-    ok &= CUDA_CHECK(cudaMalloc(&dev.state, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.risk_group, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.home_zone, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.rep_id, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.state_timer, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.home_id, u32_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.work_zone, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.infection_source, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.infection_flash, float_bytes));
+    ok &= cuda_alloc_buf(dev.x, n_ag) && cuda_alloc_buf(dev.y, n_ag) &&
+          cuda_alloc_buf(dev.vx, n_ag) && cuda_alloc_buf(dev.vy, n_ag) &&
+          cuda_alloc_buf(dev.state, n_ag) && cuda_alloc_buf(dev.risk_group, n_ag) &&
+          cuda_alloc_buf(dev.home_zone, n_ag) && cuda_alloc_buf(dev.rep_id, n_ag) &&
+          cuda_alloc_buf(dev.state_timer, n_ag) && cuda_alloc_buf(dev.home_id, n_ag) &&
+          cuda_alloc_buf(dev.work_zone, n_ag) && cuda_alloc_buf(dev.infection_source, n_ag) &&
+          cuda_alloc_buf(dev.infection_flash, n_ag) &&
+          cuda_alloc_buf(dev.cell_id, n_ag) && cuda_alloc_buf(dev.agent_idx, n_ag) &&
+          cuda_alloc_buf(dev.cell_start, n_cel) && cuda_alloc_buf(dev.cell_end, n_cel) &&
+          cuda_alloc_buf(dev.framebuffer_rgba, n_px * 4) &&
+          cuda_alloc_buf(g_d_fb_prio, n_px) &&
+          cuda_alloc_buf(g_d_counts, static_cast<size_t>(k_rep) * COUNTS_STRIDE) &&
+          cuda_alloc_buf(g_d_cell_infected, n_cel) &&
+          cuda_alloc_buf(g_d_spatial_stats, 2) && cuda_alloc_buf(g_d_hotspot_out, 2) &&
+          cuda_alloc_buf(g_d_cell_id_alt, n_ag) && cuda_alloc_buf(g_d_agent_idx_alt, n_ag) &&
+          cuda_alloc_buf(g_d_x_alt, n_ag) && cuda_alloc_buf(g_d_y_alt, n_ag) &&
+          cuda_alloc_buf(g_d_vx_alt, n_ag) && cuda_alloc_buf(g_d_vy_alt, n_ag) &&
+          cuda_alloc_buf(g_d_state_alt, n_ag) && cuda_alloc_buf(g_d_risk_alt, n_ag) &&
+          cuda_alloc_buf(g_d_home_zone_alt, n_ag) && cuda_alloc_buf(g_d_rep_id_alt, n_ag) &&
+          cuda_alloc_buf(g_d_home_id_alt, n_ag) && cuda_alloc_buf(g_d_work_zone_alt, n_ag) &&
+          cuda_alloc_buf(g_d_inf_src_alt, n_ag) && cuda_alloc_buf(g_d_inf_flash_alt, n_ag) &&
+          cuda_alloc_buf(g_d_timer_alt, n_ag) &&
+          cuda_alloc_buf(g_d_home_quarantine, static_cast<size_t>(g_max_homes)) &&
+          cuda_alloc_buf(g_d_cell_quarantine, n_cel);
 
-    ok &= CUDA_CHECK(cudaMalloc(&dev.cell_id, u32_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.agent_idx, u32_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.cell_start, cell_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&dev.cell_end, cell_bytes));
-
-    ok &= CUDA_CHECK(cudaMalloc(&dev.framebuffer_rgba, fb_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_fb_prio, static_cast<size_t>(FRAME_WIDTH) * FRAME_HEIGHT * sizeof(uint32_t)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_counts, static_cast<size_t>(k_rep) * COUNTS_STRIDE * sizeof(uint32_t)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_cell_infected, static_cast<size_t>(total_cells) * sizeof(uint32_t)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_spatial_stats, 2 * sizeof(float)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_hotspot_out, 2 * sizeof(uint32_t)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_cell_id_alt, u32_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_agent_idx_alt, u32_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_x_alt, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_y_alt, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_vx_alt, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_vy_alt, float_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_state_alt, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_risk_alt, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_home_zone_alt, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_rep_id_alt, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_home_id_alt, u32_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_work_zone_alt, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_inf_src_alt, u8_bytes));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_inf_flash_alt, float_bytes));
-    g_max_homes = total_agents + 1;
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_home_quarantine, static_cast<size_t>(g_max_homes) * sizeof(uint8_t)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_cell_quarantine, static_cast<size_t>(total_cells) * sizeof(uint8_t)));
-    ok &= CUDA_CHECK(cudaMalloc(&g_d_timer_alt, float_bytes));
     ok &= CUDA_CHECK(cudaMallocHost(&g_h_counts_pinned, static_cast<size_t>(k_rep) * COUNTS_STRIDE * sizeof(uint32_t)));
     ok &= CUDA_CHECK(cudaMallocHost(&g_h_hotspot_pinned, 2 * sizeof(uint32_t)));
 
@@ -1547,6 +1583,7 @@ bool cuda_init_simulation(
 
 namespace {
 
+// Orquesta los kernels de renderizado 1080p según modo visual y mosaico
 void launch_render_1080p(
     AgentSystemDevice& dev,
     const SimParams& params,
@@ -1968,6 +2005,7 @@ void cuda_adjust_domain_for_agents(SimParams& params, int num_agents) {
     params.cam_cy = 0.5f * params.world_height;
 }
 
+// Encuentra mediante atomicMin el home_id del agente más cercano a (wx, wy)
 __global__ void kernel_pick_nearest_home(
     int n,
     float wx,
@@ -1986,6 +2024,7 @@ __global__ void kernel_pick_nearest_home(
     atomicMin(out_best, key);
 }
 
+// Recolecta en VRAM posiciones y destinos de los miembros del hogar target_home_id
 __global__ void kernel_collect_family_track(
     int n,
     uint32_t target_home_id,
@@ -2183,80 +2222,27 @@ bool cuda_run_benchmark(
 }
 
 void cuda_free_simulation(AgentSystemDevice& dev) {
-    auto safe_free = [](auto*& ptr) {
-        if (ptr != nullptr) {
-            cudaFree(ptr);
-            ptr = nullptr;
-        }
-    };
-
-    safe_free(dev.x);
-    safe_free(dev.y);
-    safe_free(dev.vx);
-    safe_free(dev.vy);
-    safe_free(dev.state);
-    safe_free(dev.risk_group);
-    safe_free(dev.home_zone);
-    safe_free(dev.rep_id);
-    safe_free(dev.state_timer);
-    safe_free(dev.home_id);
-    safe_free(dev.work_zone);
-    safe_free(dev.infection_source);
-    safe_free(dev.infection_flash);
-    safe_free(dev.cell_id);
-    safe_free(dev.agent_idx);
-    safe_free(dev.cell_start);
-    safe_free(dev.cell_end);
-    safe_free(dev.rng_states);
-    safe_free(dev.framebuffer_rgba);
-    safe_free(g_d_fb_prio);
-    safe_free(g_d_counts);
-    safe_free(g_d_cell_infected);
-    safe_free(g_d_spatial_stats);
-    safe_free(g_d_hotspot_out);
-    safe_free(g_d_cell_id_alt);
-    safe_free(g_d_agent_idx_alt);
-    safe_free(g_d_x_alt);
-    safe_free(g_d_y_alt);
-    safe_free(g_d_vx_alt);
-    safe_free(g_d_vy_alt);
-    safe_free(g_d_state_alt);
-    safe_free(g_d_risk_alt);
-    safe_free(g_d_home_zone_alt);
-    safe_free(g_d_rep_id_alt);
-    safe_free(g_d_home_id_alt);
-    safe_free(g_d_work_zone_alt);
-    safe_free(g_d_inf_src_alt);
-    safe_free(g_d_inf_flash_alt);
-    safe_free(g_d_home_quarantine);
-    g_max_homes = 0;
-    safe_free(g_d_cell_quarantine);
-    safe_free(g_d_pick_min);
-    safe_free(g_d_family_out);
-    safe_free(g_d_timer_alt);
-    safe_free(g_d_sort_temp);
+    cuda_free_ptrs(
+        dev.x, dev.y, dev.vx, dev.vy,
+        dev.state, dev.risk_group, dev.home_zone, dev.rep_id, dev.state_timer,
+        dev.home_id, dev.work_zone, dev.infection_source, dev.infection_flash,
+        dev.cell_id, dev.agent_idx, dev.cell_start, dev.cell_end,
+        dev.rng_states, dev.framebuffer_rgba,
+        g_d_fb_prio, g_d_counts, g_d_cell_infected, g_d_spatial_stats, g_d_hotspot_out,
+        g_d_cell_id_alt, g_d_agent_idx_alt, g_d_x_alt, g_d_y_alt, g_d_vx_alt, g_d_vy_alt,
+        g_d_state_alt, g_d_risk_alt, g_d_home_zone_alt, g_d_rep_id_alt,
+        g_d_home_id_alt, g_d_work_zone_alt, g_d_inf_src_alt, g_d_inf_flash_alt,
+        g_d_home_quarantine, g_d_cell_quarantine, g_d_pick_min, g_d_family_out,
+        g_d_timer_alt, g_d_sort_temp
+    );
+    g_max_homes       = 0;
     g_sort_temp_bytes = 0;
 
-    if (g_h_counts_pinned != nullptr) {
-        cudaFreeHost(g_h_counts_pinned);
-        g_h_counts_pinned = nullptr;
-    }
-    if (g_h_hotspot_pinned != nullptr) {
-        cudaFreeHost(g_h_hotspot_pinned);
-        g_h_hotspot_pinned = nullptr;
-    }
-    if (g_ev_timer_start != nullptr) {
-        cudaEventDestroy(g_ev_timer_start);
-        g_ev_timer_start = nullptr;
-    }
-    if (g_ev_timer_stop != nullptr) {
-        cudaEventDestroy(g_ev_timer_stop);
-        g_ev_timer_stop = nullptr;
-    }
-    if (g_sim_stream != nullptr) {
-        cudaStreamDestroy(g_sim_stream);
-        g_sim_stream = nullptr;
-    }
+    if (g_h_counts_pinned)  { cudaFreeHost(g_h_counts_pinned);  g_h_counts_pinned  = nullptr; }
+    if (g_h_hotspot_pinned) { cudaFreeHost(g_h_hotspot_pinned); g_h_hotspot_pinned = nullptr; }
+    if (g_ev_timer_start)   { cudaEventDestroy(g_ev_timer_start); g_ev_timer_start = nullptr; }
+    if (g_ev_timer_stop)    { cudaEventDestroy(g_ev_timer_stop);  g_ev_timer_stop  = nullptr; }
+    if (g_sim_stream)       { cudaStreamDestroy(g_sim_stream);    g_sim_stream     = nullptr; }
 
     dev.num_agents         = 0;
     dev.agents_per_replica = 0;

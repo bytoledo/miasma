@@ -8,43 +8,46 @@ namespace seird {
 
 namespace {
 
-constexpr double PI_D = 3.14159265358979323846;
+// ============================================================================
+// 1. Utilidades internas
+// ============================================================================
 
+constexpr double PI_D = 3.14159265358979323846; // Pi en doble precisión
+
+// Derivadas instantáneas del sistema SEIRDS
 struct OdeDeriv {
-    double s = 0.0;
-    double e = 0.0;
-    double i = 0.0;
-    double r = 0.0;
-    double d = 0.0;
+    double s = 0.0, e = 0.0, i = 0.0, r = 0.0, d = 0.0;
 };
 
+// Evalúa dS/dt, dE/dt, dI/dt, dR/dt y dD/dt en el estado actual
 OdeDeriv eval_seirds_deriv(const OdeState& st, double beta_eff, const SimParams& params) {
     const double n = st.s + st.e + st.i + st.r + st.d;
     if (n <= 0.0) return {};
 
-    const double sigma   = (params.incubation_days > 1e-4f) ? (1.0 / static_cast<double>(params.incubation_days)) : 1e4;
-    const double inv_inf = (params.infectious_days > 1e-4f) ? (1.0 / static_cast<double>(params.infectious_days)) : 1e4;
+    const double sigma   = (params.incubation_days > 1e-4f) ? (1.0 / params.incubation_days) : 1e4;
+    const double inv_inf = (params.infectious_days > 1e-4f) ? (1.0 / params.infectious_days) : 1e4;
     const double alpha   = std::clamp(static_cast<double>(params.fatality_rate), 0.0, 1.0);
     const double gamma   = (1.0 - alpha) * inv_inf;
     const double mu_d    = alpha * inv_inf;
     const double nu_v    = std::max(0.0, static_cast<double>(params.vaccination_rate));
-    const double xi      = (params.immunity_days > 1e-4f) ? (1.0 / static_cast<double>(params.immunity_days)) : 0.0;
+    const double xi      = (params.immunity_days > 1e-4f) ? (1.0 / params.immunity_days) : 0.0;
 
-    const double s   = std::max(0.0, st.s);
-    const double e   = std::max(0.0, st.e);
-    const double i   = std::max(0.0, st.i);
-    const double r   = std::max(0.0, st.r);
+    const double s = std::max(0.0, st.s);
+    const double e = std::max(0.0, st.e);
+    const double i = std::max(0.0, st.i);
+    const double r = std::max(0.0, st.r);
     const double inf = beta_eff * s * i / n;
 
-    OdeDeriv k;
-    k.s = -inf - nu_v * s + xi * r;
-    k.e =  inf - sigma * e;
-    k.i =  sigma * e - (gamma + mu_d) * i;
-    k.r =  gamma * i + nu_v * s - xi * r;
-    k.d =  mu_d * i;
-    return k;
+    return {
+        -inf - nu_v * s + xi * r,
+         inf - sigma * e,
+         sigma * e - (gamma + mu_d) * i,
+         gamma * i + nu_v * s - xi * r,
+         mu_d * i
+    };
 }
 
+// Generador pseudoaleatorio determinista SplitMix64 (sin estado global)
 uint64_t splitmix64_next(uint64_t& state) {
     state += 0x9E3779B97F4A7C15ULL;
     uint64_t z = state;
@@ -53,7 +56,27 @@ uint64_t splitmix64_next(uint64_t& state) {
     return z ^ (z >> 31);
 }
 
+// Obtiene el cuantil q in [0, 1] de un vector previamente ordenado
+inline float sorted_percentile(const std::vector<float>& sorted, double q) {
+    if (sorted.empty()) return 0.0f;
+    const auto idx = static_cast<std::size_t>(q * static_cast<double>(sorted.size() - 1));
+    return sorted[idx];
+}
+
+// Inserta un elemento manteniendo el vector acotado a max_len muestras
+template <typename T>
+inline void push_bounded(std::vector<T>& vec, const T& item, std::size_t max_len = 2048) {
+    vec.push_back(item);
+    if (vec.size() > max_len) {
+        vec.erase(vec.begin());
+    }
+}
+
 } // namespace
+
+// ============================================================================
+// 2. Modelo ODE SEIRDS (RK4), tasas ABM y NGM (R0)
+// ============================================================================
 
 OdeState ode_seirds_step_rk4(const OdeState& st, double beta_eff, const SimParams& params, double dt) {
     const double n = st.s + st.e + st.i + st.r + st.d;
@@ -209,6 +232,10 @@ double sir_analytical_final_attack_rate(double r0) {
     return std::clamp(1.0 - s, 0.0, 1.0);
 }
 
+// ============================================================================
+// 3. Telemetría en tiempo real (CpuTelemetryEngine)
+// ============================================================================
+
 const char* rt_category_label(RtCategory cat) {
     switch (cat) {
         case RT_DECLINING:        return "Declining";
@@ -356,14 +383,12 @@ TelemetryMetrics CpuTelemetryEngine::update(const SimStats& stats, const SimPara
         }
 
         std::sort(rt_boot.begin(), rt_boot.end());
-        const int idx_p05 = static_cast<int>(0.05 * static_cast<double>(B - 1));
-        const int idx_p95 = static_cast<int>(0.95 * static_cast<double>(B - 1));
-        m.rt_p05 = rt_boot[idx_p05];
-        m.rt_p95 = rt_boot[idx_p95];
+        m.rt_p05 = sorted_percentile(rt_boot, 0.05);
+        m.rt_p95 = sorted_percentile(rt_boot, 0.95);
 
         int gt1 = 0;
-        for (int b = 0; b < B; ++b) {
-            if (rt_boot[b] > 1.0f) ++gt1;
+        for (float v : rt_boot) {
+            if (v > 1.0f) ++gt1;
         }
         m.prob_rt_gt_1 = static_cast<float>(gt1) / static_cast<float>(B);
     } else {
@@ -389,14 +414,13 @@ TelemetryMetrics CpuTelemetryEngine::update(const SimStats& stats, const SimPara
     }
 
     m.outbreak_alert = ((m.z_score > 2.0f) || (stats.max_cell_z > 2.0f)) && (m.rt > 1.0f);
-
-    history_.push_back(m);
-    if (history_.size() > 2048) {
-        history_.erase(history_.begin());
-    }
-
+    push_bounded(history_, m);
     return m;
 }
+
+// ============================================================================
+// 4. Ensamble Monte Carlo y Scoring probabilístico
+// ============================================================================
 
 CpuEnsembleEngine::CpuEnsembleEngine(int num_replicas, std::size_t window_size)
     : window_size_(std::max<std::size_t>(window_size, 8)) {
@@ -448,26 +472,18 @@ EnsembleMetrics CpuEnsembleEngine::update(
     std::sort(i_fracs.begin(), i_fracs.end());
     std::sort(rt_vals.begin(), rt_vals.end());
 
-    auto pct = [&](const std::vector<float>& v, double q) -> float {
-        const std::size_t idx = static_cast<std::size_t>(q * static_cast<double>(v.size() - 1));
-        return v[idx];
-    };
-
-    em.i_p05          = pct(i_fracs, 0.05);
-    em.i_p10          = pct(i_fracs, 0.10);
-    em.i_p50          = pct(i_fracs, 0.50);
-    em.i_p90          = pct(i_fracs, 0.90);
-    em.i_p95          = pct(i_fracs, 0.95);
-    em.rt_p05         = pct(rt_vals, 0.05);
-    em.rt_p50         = pct(rt_vals, 0.50);
-    em.rt_p95         = pct(rt_vals, 0.95);
+    em.i_p05          = sorted_percentile(i_fracs, 0.05);
+    em.i_p10          = sorted_percentile(i_fracs, 0.10);
+    em.i_p50          = sorted_percentile(i_fracs, 0.50);
+    em.i_p90          = sorted_percentile(i_fracs, 0.90);
+    em.i_p95          = sorted_percentile(i_fracs, 0.95);
+    em.rt_p05         = sorted_percentile(rt_vals, 0.05);
+    em.rt_p50         = sorted_percentile(rt_vals, 0.50);
+    em.rt_p95         = sorted_percentile(rt_vals, 0.95);
     em.prob_rt_gt_1   = static_cast<float>(rt_gt_1_cnt) / static_cast<float>(k);
     em.extinction_pct = 100.0f * static_cast<float>(extinct_cnt) / static_cast<float>(k);
 
-    history_.push_back(em);
-    if (history_.size() > 2048) {
-        history_.erase(history_.begin());
-    }
+    push_bounded(history_, em);
     return em;
 }
 
@@ -524,6 +540,10 @@ ForecastScoreMetrics compute_ensemble_forecast_scores(
     out.coverage_90 = static_cast<float>(static_cast<double>(cov90) / dn);
     return out;
 }
+
+// ============================================================================
+// 5. Análisis de sensibilidad global y calibración ABC-SMC
+// ============================================================================
 
 std::vector<SensitivityRow> run_global_sensitivity_sweep(
     int num_agents,
@@ -759,11 +779,11 @@ AbcSmcResult calibrate_abc_smc(
     std::sort(bs.begin(), bs.end());
     std::sort(es.begin(), es.end());
     std::sort(is.begin(), is.end());
-    res.beta_p05  = bs[static_cast<std::size_t>(0.05 * static_cast<double>(Np - 1))];
-    res.beta_p50  = bs[static_cast<std::size_t>(0.50 * static_cast<double>(Np - 1))];
-    res.beta_p95  = bs[static_cast<std::size_t>(0.95 * static_cast<double>(Np - 1))];
-    res.incub_p50 = es[static_cast<std::size_t>(0.50 * static_cast<double>(Np - 1))];
-    res.infec_p50 = is[static_cast<std::size_t>(0.50 * static_cast<double>(Np - 1))];
+    res.beta_p05  = sorted_percentile(bs, 0.05);
+    res.beta_p50  = sorted_percentile(bs, 0.50);
+    res.beta_p95  = sorted_percentile(bs, 0.95);
+    res.incub_p50 = sorted_percentile(es, 0.50);
+    res.infec_p50 = sorted_percentile(is, 0.50);
 
     // Evaluar métricas probabilísticas del ensamble posterior
     std::vector<std::vector<float>> trajs(static_cast<std::size_t>(Np));
@@ -779,13 +799,13 @@ AbcSmcResult calibrate_abc_smc(
         std::vector<float> vals(static_cast<std::size_t>(Np));
         for (int i = 0; i < Np; ++i) vals[static_cast<std::size_t>(i)] = trajs[static_cast<std::size_t>(i)][static_cast<std::size_t>(t)];
         std::sort(vals.begin(), vals.end());
-        auto q = [&](double p) { return vals[static_cast<std::size_t>(p * static_cast<double>(Np - 1))]; };
-        ens_post[static_cast<std::size_t>(t)].sim_day = obs_days[static_cast<std::size_t>(t)];
-        ens_post[static_cast<std::size_t>(t)].i_p05   = q(0.05);
-        ens_post[static_cast<std::size_t>(t)].i_p10   = q(0.10);
-        ens_post[static_cast<std::size_t>(t)].i_p50   = q(0.50);
-        ens_post[static_cast<std::size_t>(t)].i_p90   = q(0.90);
-        ens_post[static_cast<std::size_t>(t)].i_p95   = q(0.95);
+        auto& ep   = ens_post[static_cast<std::size_t>(t)];
+        ep.sim_day = obs_days[static_cast<std::size_t>(t)];
+        ep.i_p05   = sorted_percentile(vals, 0.05);
+        ep.i_p10   = sorted_percentile(vals, 0.10);
+        ep.i_p50   = sorted_percentile(vals, 0.50);
+        ep.i_p90   = sorted_percentile(vals, 0.90);
+        ep.i_p95   = sorted_percentile(vals, 0.95);
     }
     res.posterior_scores = compute_ensemble_forecast_scores(ens_post, obs_i_frac);
     return res;

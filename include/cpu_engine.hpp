@@ -16,10 +16,11 @@ enum RtCategory : uint8_t {
     RT_GROWING          = 4  // P(Rt > 1) > 90%
 };
 
+// Devuelve la etiqueta legible de la categoría operativa CDC CFA para R_t
 const char* rt_category_label(RtCategory cat);
 
 struct TelemetryMetrics {
-    SimStats stats;
+    SimStats   stats;                      // Conteos SEIRD y espaciales del último muestreo
     float      rt              = 0.0f;  // Número reproductivo efectivo R_t (puntual)
     float      rt_p05          = 0.0f;  // Percentil 5% bootstrap OpenMP de R_t
     float      rt_p95          = 0.0f;  // Percentil 95% bootstrap OpenMP de R_t
@@ -34,12 +35,12 @@ struct TelemetryMetrics {
 };
 
 struct OdeState {
-    double s   = 0.0;
-    double e   = 0.0;
-    double i   = 0.0;
-    double r   = 0.0;
-    double d   = 0.0;
-    double day = 0.0;
+    double s   = 0.0; // Susceptibles continuos
+    double e   = 0.0; // Expuestos continuos
+    double i   = 0.0; // Infectados continuos
+    double r   = 0.0; // Recuperados continuos
+    double d   = 0.0; // Fallecidos continuos
+    double day = 0.0; // Tiempo simulado en días
 };
 
 // Avanza un paso dt del sistema ODE SEIRDS homogéneo mediante Runge-Kutta de 4.º orden (RK4)
@@ -80,15 +81,16 @@ public:
     // Reinicia el historial de telemetría
     void reset();
 
+    // Devuelve el historial completo de métricas calculadas
     const std::vector<TelemetryMetrics>& history() const { return history_; }
 
 private:
-    std::size_t window_size_;
-    uint64_t    update_count_  = 0;
-    uint64_t    cum_infections_ = 0;
-    std::vector<SimStats>         stats_window_;
-    std::vector<float>            incidence_window_;
-    std::vector<TelemetryMetrics> history_;
+    std::size_t window_size_;              // Tamaño máximo de la ventana móvil
+    uint64_t    update_count_  = 0;        // Número de muestreos procesados
+    uint64_t    cum_infections_ = 0;       // Infectados acumulados (para IFR)
+    std::vector<SimStats>         stats_window_;     // Ventana reciente de SimStats
+    std::vector<float>            incidence_window_; // Ventana reciente de incidencia diaria
+    std::vector<TelemetryMetrics> history_;          // Historial acotado de telemetría
 };
 
 struct EnsembleMetrics {
@@ -142,32 +144,32 @@ std::vector<SensitivityRow> run_global_sensitivity_sweep(
 );
 
 struct AbcParticle {
-    float beta            = 0.25f;
-    float incubation_days = 5.0f;
-    float infectious_days = 10.0f;
-    float weight          = 1.0f;
-    float distance        = 0.0f;
+    float beta            = 0.25f; // Tasa de contagio propuesta
+    float incubation_days = 5.0f;  // Días de incubación propuestos
+    float infectious_days = 10.0f; // Días infecciosos propuestos
+    float weight          = 1.0f;  // Peso SMC normalizado
+    float distance        = 0.0f;  // Error RMSE respecto a la serie observada
 };
 
 struct AbcSmcConfig {
-    int      num_particles   = 64;
-    int      num_generations = 4;
-    float    beta_min        = 0.05f, beta_max  = 0.60f;
-    float    incub_min       = 2.0f,  incub_max = 10.0f;
-    float    infec_min       = 4.0f,  infec_max = 18.0f;
-    float    obs_noise_cv    = 0.03f;
-    uint64_t seed            = 2026ULL;
+    int      num_particles   = 64;     // Partículas por generación SMC
+    int      num_generations = 4;      // Número de generaciones secuenciales
+    float    beta_min        = 0.05f, beta_max  = 0.60f; // Rango prior de beta
+    float    incub_min       = 2.0f,  incub_max = 10.0f; // Rango prior de incubación
+    float    infec_min       = 4.0f,  infec_max = 18.0f; // Rango prior de infecciosidad
+    float    obs_noise_cv    = 0.03f;  // Ruido multiplicativo de observación
+    uint64_t seed            = 2026ULL;// Semilla RNG reproducible
 };
 
 struct AbcSmcResult {
-    std::vector<AbcParticle> posterior;
-    float beta_p05         = 0.0f;
-    float beta_p50         = 0.0f;
-    float beta_p95         = 0.0f;
-    float incub_p50        = 0.0f;
-    float infec_p50        = 0.0f;
-    float final_epsilon    = 0.0f;
-    ForecastScoreMetrics posterior_scores{};
+    std::vector<AbcParticle> posterior; // Muestra posterior ponderada final
+    float beta_p05         = 0.0f;      // Percentil 5% posterior de beta
+    float beta_p50         = 0.0f;      // Mediana posterior de beta
+    float beta_p95         = 0.0f;      // Percentil 95% posterior de beta
+    float incub_p50        = 0.0f;      // Mediana posterior de incubación
+    float infec_p50        = 0.0f;      // Mediana posterior de infecciosidad
+    float final_epsilon    = 0.0f;      // Tolerancia RMSE alcanzada
+    ForecastScoreMetrics posterior_scores{}; // Scores probabilísticos del posterior
 };
 
 // Calibración estocástica mediante Approximate Bayesian Computation Sequential Monte Carlo (ABC-SMC)

@@ -45,10 +45,10 @@ float cuda_timer_end_ms();
 void cuda_get_vram_info(float& used_mb, float& total_mb);
 
 struct HardwareLimits {
-    size_t vram_free_mb      = 0;
-    size_t vram_total_mb     = 0;
-    size_t bytes_per_agent   = 0;
-    int    max_agents_vram   = 0;
+    size_t vram_free_mb      = 0; // VRAM libre reportada por CUDA (MB)
+    size_t vram_total_mb     = 0; // VRAM total del dispositivo (MB)
+    size_t bytes_per_agent   = 0; // Memoria estimada por agente (bytes)
+    int    max_agents_vram   = 0; // Máximo teórico según VRAM disponible
     int    safe_agents_limit = 0; // Tope recomendado considerando densidad y WDDM
 };
 
@@ -62,18 +62,18 @@ void cuda_adjust_domain_for_agents(SimParams& params, int num_agents);
 void cuda_build_urban_preset(SimParams& params, int preset);
 
 struct FamilyMemberInfo {
-    float   x = 0.0f, y = 0.0f;
-    float   work_x = 0.0f, work_y = 0.0f;
-    uint8_t state = STATE_S;
-    uint8_t risk_group = RISK_LOW;
+    float   x = 0.0f, y = 0.0f;        // Posición actual del integrante
+    float   work_x = 0.0f, work_y = 0.0f; // Destino laboral/escolar asignado
+    uint8_t state = STATE_S;           // Estado SEIRD actual
+    uint8_t risk_group = RISK_LOW;     // Grupo de riesgo
 };
 
 struct FamilyTrackInfo {
-    int   home_id = -1;
-    float home_x  = 0.0f;
-    float home_y  = 0.0f;
-    int   count   = 0;
-    FamilyMemberInfo members[8]{};
+    int   home_id = -1;            // ID de hogar inspeccionado
+    float home_x  = 0.0f;          // Coordenada X del hogar
+    float home_y  = 0.0f;          // Coordenada Y del hogar
+    int   count   = 0;             // Cantidad de integrantes encontrados
+    FamilyMemberInfo members[8]{}; // Datos de hasta 8 integrantes
 };
 
 // Selecciona el home_id del agente más cercano a (world_x, world_y) en la réplica 0
@@ -83,12 +83,12 @@ int cuda_pick_nearest_home_id(const AgentSystemDevice& dev, float world_x, float
 bool cuda_get_family_track(const AgentSystemDevice& dev, const SimParams& params, int home_id, FamilyTrackInfo& out_info);
 
 struct BenchmarkResult {
-    int    num_agents      = 0;
-    int    steps           = 0;
-    float  avg_step_ms     = 0.0f;
-    float  avg_render_ms   = 0.0f;
-    double agents_per_sec  = 0.0;
-    float  vram_used_mb    = 0.0f;
+    int    num_agents      = 0;    // Población evaluada
+    int    steps           = 0;    // Pasos medidos
+    float  avg_step_ms     = 0.0f; // Tiempo promedio de paso físico (ms)
+    float  avg_render_ms   = 0.0f; // Tiempo promedio de render 1080p (ms)
+    double agents_per_sec  = 0.0;  // Throughput en agentes/segundo
+    float  vram_used_mb    = 0.0f; // VRAM consumida durante el benchmark (MB)
 };
 
 // Ejecuta un benchmark con cudaEvent_t (sin ventana gráfica)

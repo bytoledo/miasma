@@ -4,10 +4,10 @@
 
 namespace seird {
 
-constexpr int FRAME_WIDTH     = 1920;
-constexpr int FRAME_HEIGHT    = 1080;
-constexpr int MAX_REPLICAS    = 64;
-constexpr int MAX_URBAN_ZONES = 32;
+constexpr int FRAME_WIDTH     = 1920; // Ancho del framebuffer de render en píxeles
+constexpr int FRAME_HEIGHT    = 1080; // Alto del framebuffer de render en píxeles
+constexpr int MAX_REPLICAS    = 64;   // Máximo de réplicas Monte Carlo simultáneas
+constexpr int MAX_URBAN_ZONES = 32;   // Máximo de zonas urbanas configurables
 
 enum AgentState : uint8_t {
     STATE_S = 0, // Susceptible
@@ -33,12 +33,12 @@ enum ZoneType : uint8_t {
 };
 
 enum InfectionSource : uint8_t {
-    SRC_NONE     = 0,
-    SRC_HOME     = 1,
-    SRC_WORK     = 2,
-    SRC_TRANSIT  = 3,
-    SRC_HOSPITAL = 4,
-    SRC_LEISURE  = 5
+    SRC_NONE     = 0, // Sin contagio registrado
+    SRC_HOME     = 1, // Contagio en vivienda
+    SRC_WORK     = 2, // Contagio en trabajo o escuela
+    SRC_TRANSIT  = 3, // Contagio durante traslado / transporte
+    SRC_HOSPITAL = 4, // Contagio en hospital
+    SRC_LEISURE  = 5  // Contagio en zona de ocio / comercio
 };
 
 enum UrbanPreset : int {
@@ -48,12 +48,12 @@ enum UrbanPreset : int {
 };
 
 struct UrbanZone {
-    float    cx       = 0.0f;
-    float    cy       = 0.0f;
+    float    cx       = 0.0f;  // Coordenada X del centro de la zona
+    float    cy       = 0.0f;  // Coordenada Y del centro de la zona
     float    radius   = 40.0f; // Radio equivalente / referencia
     float    half_w   = 40.0f; // Semi-ancho del distrito rectangular
     float    half_h   = 40.0f; // Semi-alto del distrito rectangular
-    ZoneType type     = ZONE_HOME;
+    ZoneType type     = ZONE_HOME; // Categoría funcional de la zona
     float    capacity = 0.0f;  // Capacidad (ej. camas en hospital)
 };
 
@@ -99,18 +99,18 @@ struct alignas(32) SimParams {
     int   num_replicas          = 1;     // Réplicas Monte Carlo en paralelo (1..MAX_REPLICAS)
 
     // Opciones de visualización en GPU y cámara (Zoom/Pan)
-    int   render_mode   = RENDER_HYBRID;
-    bool  enable_trails = true;
-    bool  show_rings    = true;
-    float cam_cx        = 500.0f;
-    float cam_cy        = 500.0f;
-    float cam_zoom      = 1.0f;
+    int   render_mode   = RENDER_HYBRID; // Modo visual activo (Agentes / Heatmap / Híbrido)
+    bool  enable_trails = true;          // Habilita estelas de movimiento en framebuffer
+    bool  show_rings    = true;          // Dibuja anillos de radio de contagio
+    float cam_cx        = 500.0f;        // Centro X de la cámara en el mundo
+    float cam_cy        = 500.0f;        // Centro Y de la cámara en el mundo
+    float cam_zoom      = 1.0f;          // Factor de zoom de la cámara
 
     // Layouts urbanos, flujo familiar y sub-stepping (Bloque 4)
-    bool      enable_urban_layout  = false;
-    int       urban_preset         = PRESET_MONOCENTRIC;
-    int       num_urban_zones      = 0;
-    UrbanZone urban_zones[MAX_URBAN_ZONES]{};
+    bool      enable_urban_layout  = false;              // Activa distritos y rutina horaria
+    int       urban_preset         = PRESET_MONOCENTRIC; // Preset urbano seleccionado
+    int       num_urban_zones      = 0;                  // Cantidad de zonas urbanas activas
+    UrbanZone urban_zones[MAX_URBAN_ZONES]{};            // Arreglo de zonas urbanas del mapa
     bool      household_quarantine = false; // Aislamiento domiciliario por hogar si hay un I
     bool      close_schools_work   = false; // Cierre de escuelas / home office
     int       selected_home_id     = -1;    // Hogar resaltado para inspección (-1 = ninguno)
@@ -120,23 +120,23 @@ struct alignas(32) SimParams {
 };
 
 struct SimStats {
-    uint32_t count_s       = 0;
-    uint32_t count_e       = 0;
-    uint32_t count_i       = 0;
-    uint32_t count_r       = 0;
-    uint32_t count_d       = 0;
+    uint32_t count_s       = 0;    // Total de susceptibles
+    uint32_t count_e       = 0;    // Total de expuestos
+    uint32_t count_i       = 0;    // Total de infectados
+    uint32_t count_r       = 0;    // Total de recuperados
+    uint32_t count_d       = 0;    // Total de fallecidos
     uint32_t new_exposures = 0;    // Contagios reales acumulados (S -> E) desde el último muestreo
     uint32_t hotspot_cells = 0;    // Celdas con brote anómalo (Z > 2.0 en GPU)
     float    max_cell_z    = 0.0f; // Z-score espacial máximo calculado en GPU
-    float    sim_day       = 0.0f;
+    float    sim_day       = 0.0f; // Día simulado actual
 
     // Atribución de contagios y ocupación hospitalaria (Bloque 4)
-    uint32_t src_home           = 0;
-    uint32_t src_work           = 0;
-    uint32_t src_transit        = 0;
-    uint32_t src_hospital       = 0;
-    uint32_t src_leisure        = 0;
-    uint32_t hospitalized_count = 0;
+    uint32_t src_home           = 0; // Contagios originados en hogar
+    uint32_t src_work           = 0; // Contagios originados en trabajo/escuela
+    uint32_t src_transit        = 0; // Contagios originados en tránsito
+    uint32_t src_hospital       = 0; // Contagios originados en hospital
+    uint32_t src_leisure        = 0; // Contagios originados en ocio
+    uint32_t hospitalized_count = 0; // Infectados actualmente hospitalizados
 };
 
 // Punteros a memoria de GPU en formato Structure of Arrays (SoA)
@@ -147,17 +147,17 @@ struct AgentSystemDevice {
     int num_cells          = 0; // Celdas por réplica (grid_w * grid_h)
 
     // Cinemática
-    float* x  = nullptr;
-    float* y  = nullptr;
-    float* vx = nullptr;
-    float* vy = nullptr;
+    float* x  = nullptr; // Posición X en el mundo
+    float* y  = nullptr; // Posición Y en el mundo
+    float* vx = nullptr; // Velocidad X (unidades/día)
+    float* vy = nullptr; // Velocidad Y (unidades/día)
 
     // Estado SEIRD y estratificación
-    uint8_t* state       = nullptr;
-    uint8_t* risk_group  = nullptr;
+    uint8_t* state       = nullptr; // Estado SEIRD (STATE_S..STATE_D)
+    uint8_t* risk_group  = nullptr; // Grupo de riesgo (bits 0-1) + flag superdispersor (bit 7)
     uint8_t* home_zone   = nullptr; // Bits 0-3: hogar (0..7), Bits 4-7: actividad/trabajo (0..7)
     uint8_t* rep_id      = nullptr; // Índice de réplica Monte Carlo (0..num_replicas-1)
-    float*   state_timer = nullptr;
+    float*   state_timer = nullptr; // Tiempo restante en estado E/I o inmunidad R
 
     // Estructura familiar y atribución de contagios (Bloque 4)
     uint32_t* home_id          = nullptr; // ID de familia compartido (2-5 agentes)
@@ -166,10 +166,10 @@ struct AgentSystemDevice {
     float*    infection_flash  = nullptr; // Temporizador de destello visual al contagiarse
 
     // Spatial Hashing (Uniform Grid)
-    uint32_t* cell_id    = nullptr;
-    uint32_t* agent_idx  = nullptr;
-    int*      cell_start = nullptr;
-    int*      cell_end   = nullptr;
+    uint32_t* cell_id    = nullptr; // ID de celda espacial por agente
+    uint32_t* agent_idx  = nullptr; // Índice original del agente para ordenamiento
+    int*      cell_start = nullptr; // Índice inicial de agentes en cada celda
+    int*      cell_end   = nullptr; // Índice final (exclusivo) de agentes en cada celda
 
     // Estado RNG opaco para mantener types.hpp libre de headers CUDA en main.cpp
     void* rng_states = nullptr;
@@ -177,5 +177,28 @@ struct AgentSystemDevice {
     // Framebuffer RGBA 1080p en VRAM (1920 * 1080 * 4 bytes)
     uint8_t* framebuffer_rgba = nullptr;
 };
+
+#ifdef __CUDACC__
+#define SEIRD_HD __host__ __device__ __forceinline__
+#else
+#define SEIRD_HD inline
+#endif
+
+// Calcula dimensiones (cols x rows) del mosaico para K réplicas Monte Carlo
+SEIRD_HD void compute_mosaic_grid(int k, int& cols, int& rows) {
+    if (k <= 1)       { cols = 1; rows = 1; return; }
+    if (k == 2)       { cols = 2; rows = 1; return; }
+    if (k <= 4)       { cols = 2; rows = 2; return; }
+    if (k <= 6)       { cols = 3; rows = 2; return; }
+    if (k <= 8)       { cols = 4; rows = 2; return; }
+    if (k <= 12)      { cols = 4; rows = 3; return; }
+    if (k <= 16)      { cols = 4; rows = 4; return; }
+    if (k <= 24)      { cols = 6; rows = 4; return; }
+    if (k <= 32)      { cols = 8; rows = 4; return; }
+    cols = 8;
+    rows = (k + 7) / 8;
+}
+
+#undef SEIRD_HD
 
 } // namespace seird

@@ -42,8 +42,13 @@ __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
 
 namespace {
 
-constexpr int SIDEBAR_W = 330;
+// ============================================================================
+// 1. Constantes, IDs de controles y estado global compartido
+// ============================================================================
 
+constexpr int SIDEBAR_W = 330; // Ancho del panel lateral de controles (px)
+
+// Identificadores de controles Win32 (botones, pestañas y sliders)
 enum ControlId : int {
     ID_BTN_PAUSE       = 101,
     ID_BTN_RESET       = 102,
@@ -72,44 +77,48 @@ enum ControlId : int {
     ID_TRK_INIT_INF    = 207
 };
 
+// Muestra resumida para graficar curvas históricas SEIRD / ODE / Ensamble
 struct HistoryPoint {
-    float day;
-    float s, e, i, r, d;
-    float ode_i;
-    float i_p05, i_p50, i_p95;
+    float day;             // Día simulado
+    float s, e, i, r, d;   // Fracciones poblacionales S, E, I, R, D
+    float ode_i;           // Fracción infectada del modelo ODE de referencia
+    float i_p05, i_p50, i_p95; // Banda de percentiles del ensamble Monte Carlo
 };
 
-std::atomic<bool> g_running{true};
-std::atomic<bool> g_paused{false}; // Se define desde el Launcher al iniciar
-std::atomic<bool> g_reset_requested{false};
-std::atomic<bool> g_force_render{false};
-std::atomic<bool> g_single_step_requested{false};
-std::atomic<bool> g_force_ui_stats{false};
-std::atomic<bool> g_export_requested{false};
-std::atomic<bool> g_pick_family_requested{false};
-std::atomic<float> g_pick_wx{0.0f};
-std::atomic<float> g_pick_wy{0.0f};
+// Banderas atómicas de sincronización entre hilo UI y worker CUDA
+std::atomic<bool> g_running{true};              // Mantiene activos el loop UI y el worker
+std::atomic<bool> g_paused{false};              // Pausa/reanuda la simulación
+std::atomic<bool> g_reset_requested{false};     // Solicita reinicio completo en GPU
+std::atomic<bool> g_force_render{false};        // Fuerza re-renderizado en pausa (zoom/pan)
+std::atomic<bool> g_single_step_requested{false}; // Avanza exactamente 1 paso en pausa
+std::atomic<bool> g_force_ui_stats{false};      // Fuerza actualización inmediata de etiquetas UI
+std::atomic<bool> g_export_requested{false};    // Dispara exportación CSV + JSON
+std::atomic<bool> g_pick_family_requested{false}; // Solicita seleccionar hogar cercano al clic
+std::atomic<float> g_pick_wx{0.0f};             // Coordenada X del mundo del clic a inspeccionar
+std::atomic<float> g_pick_wy{0.0f};             // Coordenada Y del mundo del clic a inspeccionar
 
+// Estado compartido protegido por g_state_mtx
 std::mutex g_state_mtx;
-int    g_substeps         = 4;    // 4 * 0.05 = 0.20 días/frame
-int    g_chart_days       = 30;   // Ventana de días en la gráfica inferior
-int    g_initial_infected = 150;  // Casos iniciales al iniciar/reiniciar
+int    g_substeps         = 4;     // Pasos CUDA ejecutados por cuadro
+int    g_chart_days       = 30;    // Ventana visible de días en la gráfica
+int    g_initial_infected = 150;   // Casos iniciales al iniciar/reiniciar
 uint64_t g_user_seed      = 42ULL; // 0 = aleatoria al reiniciar, >0 = semilla fija reproducible
-float  g_chart_scroll_day = 0.0f; // Día inicial visible al deslizar la gráfica
-bool   g_chart_autofollow = true; // Sigue automáticamente el último día
-bool   g_dragging_chart   = false;
-bool   g_dragging_map     = false;
-int    g_drag_last_x      = 0;
-int    g_drag_last_y      = 0;
-int    g_win_w            = 1440;
-int    g_win_h            = 900;
-int    g_active_tab       = 0; // 0: Control/Ciudad, 1: Parametros, 2: Vista/Export
-bool   g_hover_chart      = false;
-float  g_hover_ndc_x      = 0.0f;
-GLuint g_gl_font_base     = 0;
+float  g_chart_scroll_day = 0.0f;  // Día inicial visible al deslizar la gráfica
+bool   g_chart_autofollow = true;  // Sigue automáticamente el último día
+bool   g_dragging_chart   = false; // Arrastrando eje temporal de la gráfica
+bool   g_dragging_map     = false; // Arrastrando mapa (pan de cámara)
+int    g_drag_last_x      = 0;     // Última posición X del mouse durante arrastre
+int    g_drag_last_y      = 0;     // Última posición Y del mouse durante arrastre
+int    g_win_w            = 1440;  // Ancho actual de la ventana principal
+int    g_win_h            = 900;   // Alto actual de la ventana principal
+int    g_active_tab       = 0;     // Pestaña activa: 0=Control, 1=Parámetros, 2=Vista
+bool   g_hover_chart      = false; // Cursor sobre el área de la gráfica
+float  g_hover_ndc_x      = 0.0f;  // Posición X normalizada del cursor sobre la gráfica
+GLuint g_gl_font_base     = 0;     // Base de listas OpenGL para texto bitmap
 
-seird::SimParams g_params;
+seird::SimParams g_params; // Parámetros activos de simulación y visualización
 
+// Handles Win32 del canvas, controles laterales y recursos GDI
 HWND g_gl_hwnd         = nullptr;
 HWND g_lbl_stats       = nullptr;
 HWND g_btn_pause       = nullptr;
@@ -135,6 +144,44 @@ HFONT  g_font_ui       = nullptr;
 HFONT  g_font_mono     = nullptr;
 HICON  g_app_icon      = nullptr;
 
+// ============================================================================
+// 2. Utilidades Win32, reloj epidemiológico, logo e icono
+// ============================================================================
+
+// Desglose de reloj simulado y fase horaria/urbana para HUD y panel lateral
+struct SimClockInfo {
+    int         days     = 0;     // Días completos transcurridos
+    int         hours    = 0;     // Hora del día (0..23)
+    int         mins     = 0;     // Minuto de la hora (0..59)
+    bool        is_night = false; // true entre 20:00 y 05:59
+    const char* phase    = "";    // Etiqueta de fase diaria (Traslado, Día Laboral, etc.)
+    const char* city     = "";    // Etiqueta del preset urbano activo
+};
+
+// Convierte sim_day y preset urbano en reloj legible y fase de actividad
+SimClockInfo compute_sim_clock(float sim_day, int urban_preset) {
+    SimClockInfo info;
+    info.days       = static_cast<int>(sim_day);
+    int total_mins  = static_cast<int>(std::round((sim_day - static_cast<float>(info.days)) * 24.0f * 60.0f));
+    info.hours      = (total_mins / 60) % 24;
+    info.mins       = total_mins % 60;
+    info.is_night   = (info.hours >= 20 || info.hours < 6);
+
+    float fhours = static_cast<float>(info.hours) + static_cast<float>(info.mins) / 60.0f;
+    bool is_wknd = ((info.days % 7) >= 5);
+    info.phase = is_wknd
+        ? (info.is_night ? "Noche (Wknd)" : "Ocio/Hogar")
+        : ((info.hours >= 6 && fhours < 8.5f) ? "Traslado Ida"
+            : ((fhours >= 8.5f && fhours < 17.5f) ? "Dia Laboral"
+                : ((fhours >= 17.5f && info.hours < 20) ? "Retorno" : "Noche")));
+
+    info.city = (urban_preset == seird::PRESET_MONOCENTRIC)
+        ? "Monocentrica"
+        : ((urban_preset == seird::PRESET_POLYCENTRIC) ? "Policentrica" : "Organico");
+    return info;
+}
+
+// Dibuja el logotipo vectorial de Miasma-Parallel en el HDC dado
 void draw_miasma_logo(HDC hdc, int cx, int cy, int r) {
     // 1. Lobulos azules superpuestos (polos S) + puntos grises (D)
     const int lx[7] = { -55,  0,  55, -72,  72, -45,  45 };
@@ -252,6 +299,10 @@ HICON create_app_icon() {
     return icon;
 }
 
+// ============================================================================
+// 3. Splash screen inicial
+// ============================================================================
+
 struct SplashState {
     HWND hwnd = nullptr;
     int  progress = 0;
@@ -363,6 +414,11 @@ HWND g_trk_init_inf    = nullptr;
 
 uint64_t read_edit_u64(HWND h, uint64_t fallback);
 
+// ============================================================================
+// 4. Panel lateral, pestañas y controles Win32
+// ============================================================================
+
+// Actualiza las etiquetas numéricas de los sliders del panel lateral
 void update_slider_labels() {
     char buf[80];
     if (g_lbl_quarantine) {
@@ -396,6 +452,7 @@ void update_slider_labels() {
     }
 }
 
+// Refresca el texto y estado visual de los botones de modo y filtros
 void update_visual_buttons() {
     if (g_btn_render_mode) {
         const char* label = "Vista: Agentes [M]";
@@ -445,6 +502,7 @@ void update_visual_buttons() {
     }
 }
 
+// Sincroniza la posición de todos los sliders desde g_params
 void sync_sliders_from_params() {
     if (g_trk_quarantine) SendMessageA(g_trk_quarantine, TBM_SETPOS, TRUE, static_cast<LPARAM>(g_params.quarantine_factor * 100.0f));
     if (g_trk_beta)       SendMessageA(g_trk_beta,       TBM_SETPOS, TRUE, static_cast<LPARAM>(g_params.beta * 100.0f));
@@ -456,6 +514,7 @@ void sync_sliders_from_params() {
     update_slider_labels();
 }
 
+// Muestra únicamente los controles de la pestaña lateral seleccionada
 void update_sidebar_tab_visibility() {
     if (!g_btn_pause) return;
     HWND parent = GetParent(g_btn_pause);
@@ -498,6 +557,7 @@ void update_sidebar_tab_visibility() {
     if (g_tab_visual)  InvalidateRect(g_tab_visual,  nullptr, FALSE);
 }
 
+// Posiciona el canvas OpenGL y los controles del panel lateral según tamaño de ventana
 void layout_controls(int w, int h) {
     int gl_w = std::max(100, w - SIDEBAR_W);
     if (g_gl_hwnd) {
@@ -558,6 +618,7 @@ void layout_controls(int w, int h) {
     update_sidebar_tab_visibility();
 }
 
+// Crea fuentes, botones, sliders y etiquetas del panel lateral
 void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
     if (!g_font_ui) {
         g_font_ui = CreateFontA(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -600,33 +661,18 @@ void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
     g_btn_close_work  = make_ctrl("BUTTON", "Cierre Trab: OFF [W]", BS_PUSHBUTTON, ID_BTN_CLOSE_WORK);
     g_btn_follow_fam  = make_ctrl("BUTTON", "Seguir Familia [P]", BS_PUSHBUTTON, ID_BTN_FOLLOW_FAM);
 
-    g_lbl_quarantine = make_ctrl("STATIC", "Movilidad / Cuarentena", SS_LEFT, 0);
-    g_trk_quarantine = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_QUARANTINE);
-    SendMessageA(g_trk_quarantine, TBM_SETRANGE, TRUE, MAKELPARAM(5, 150));
-
-    g_lbl_beta = make_ctrl("STATIC", "Tasa de Contagio (beta)", SS_LEFT, 0);
-    g_trk_beta = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_BETA);
-    SendMessageA(g_trk_beta, TBM_SETRANGE, TRUE, MAKELPARAM(1, 100));
-
-    g_lbl_fatality = make_ctrl("STATIC", "Letalidad (alpha)", SS_LEFT, 0);
-    g_trk_fatality = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_FATALITY);
-    SendMessageA(g_trk_fatality, TBM_SETRANGE, TRUE, MAKELPARAM(0, 300));
-
-    g_lbl_radius = make_ctrl("STATIC", "Radio de Contagio", SS_LEFT, 0);
-    g_trk_radius = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_RADIUS);
-    SendMessageA(g_trk_radius, TBM_SETRANGE, TRUE, MAKELPARAM(10, 70));
-
-    g_lbl_substeps = make_ctrl("STATIC", "Velocidad", SS_LEFT, 0);
-    g_trk_substeps = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_SUBSTEPS);
-    SendMessageA(g_trk_substeps, TBM_SETRANGE, TRUE, MAKELPARAM(1, 48));
-
-    g_lbl_chart_days = make_ctrl("STATIC", "Ventana de Grafica", SS_LEFT, 0);
-    g_trk_chart_days = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_CHART_DAYS);
-    SendMessageA(g_trk_chart_days, TBM_SETRANGE, TRUE, MAKELPARAM(2, 120));
-
-    g_lbl_init_inf = make_ctrl("STATIC", "Casos iniciales (Reiniciar)", SS_LEFT, 0);
-    g_trk_init_inf = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, ID_TRK_INIT_INF);
-    SendMessageA(g_trk_init_inf, TBM_SETRANGE, TRUE, MAKELPARAM(1, 5000));
+    auto make_slider = [&](const char* title, int min_v, int max_v, int id, HWND& out_lbl, HWND& out_trk) {
+        out_lbl = make_ctrl("STATIC", title, SS_LEFT, 0);
+        out_trk = make_ctrl(TRACKBAR_CLASSA, "", TBS_HORZ | TBS_NOTICKS, id);
+        SendMessageA(out_trk, TBM_SETRANGE, TRUE, MAKELPARAM(min_v, max_v));
+    };
+    make_slider("Movilidad / Cuarentena",    5,  150, ID_TRK_QUARANTINE, g_lbl_quarantine, g_trk_quarantine);
+    make_slider("Tasa de Contagio (beta)",   1,  100, ID_TRK_BETA,       g_lbl_beta,       g_trk_beta);
+    make_slider("Letalidad (alpha)",         0,  300, ID_TRK_FATALITY,   g_lbl_fatality,   g_trk_fatality);
+    make_slider("Radio de Contagio",        10,   70, ID_TRK_RADIUS,     g_lbl_radius,     g_trk_radius);
+    make_slider("Velocidad",                 1,   48, ID_TRK_SUBSTEPS,   g_lbl_substeps,   g_trk_substeps);
+    make_slider("Ventana de Grafica",        2,  120, ID_TRK_CHART_DAYS, g_lbl_chart_days, g_trk_chart_days);
+    make_slider("Casos iniciales (Reiniciar)", 1, 5000, ID_TRK_INIT_INF, g_lbl_init_inf,   g_trk_init_inf);
 
     g_lbl_seed = make_ctrl("STATIC", "Seed (0=aleatoria):", SS_LEFT, 0);
     char sbuf_init[32];
@@ -656,6 +702,7 @@ void create_sidebar_controls(HWND hwnd, HINSTANCE hinst) {
     update_sidebar_tab_visibility();
 }
 
+// Limita cam_zoom y mantiene el centro de cámara dentro de los bordes del mundo
 void clamp_camera_locked(seird::SimParams& params) {
     params.cam_zoom = std::clamp(params.cam_zoom, 1.0f, 20.0f);
     float vw = params.world_width  / params.cam_zoom;
@@ -666,6 +713,11 @@ void clamp_camera_locked(seird::SimParams& params) {
     params.cam_cy = std::clamp(params.cam_cy, half_h, params.world_height - half_h);
 }
 
+// ============================================================================
+// 5. Canvas OpenGL y ventana principal (WndProc)
+// ============================================================================
+
+// Procedimiento de ventana del canvas OpenGL (zoom, pan, clic de familia y scroll de gráfica)
 LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_ERASEBKGND:
@@ -846,6 +898,7 @@ LRESULT CALLBACK GLCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 }
 
+// Procedimiento de la ventana principal (botones owner-draw, sliders, atajos de teclado)
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CTLCOLORSTATIC: {
@@ -1259,6 +1312,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 }
 
+// ============================================================================
+// 6. Gráficas OpenGL y HUD
+// ============================================================================
+
+// Dibuja texto bitmap en coordenadas OpenGL NDC (x, y)
 void draw_gl_text(float x, float y, const char* text) {
     if (g_gl_font_base == 0 || !text) return;
     glRasterPos2f(x, y);
@@ -1268,6 +1326,7 @@ void draw_gl_text(float x, float y, const char* text) {
     glPopAttrib();
 }
 
+// Renderiza la gráfica inferior de curvas SEIRD, ODE de referencia y banda P5-P95
 void draw_epidemic_curve_overlay(
     const std::deque<HistoryPoint>& hist,
     float current_day,
@@ -1456,6 +1515,11 @@ void draw_epidemic_curve_overlay(
     }
 }
 
+// ============================================================================
+// 7. Exportación de reportes (CSV + JSON)
+// ============================================================================
+
+// Exporta la serie temporal a CSV y el resumen/parámetros a JSON en reports/
 void export_simulation_report(
     HWND owner,
     const std::vector<seird::TelemetryMetrics>& hist,
@@ -1637,6 +1701,10 @@ void export_simulation_report(
     );
     MessageBoxA(owner, summary, "Reporte Exportado (CSV + JSON)", MB_OK | MB_ICONINFORMATION);
 }
+
+// ============================================================================
+// 8. Launcher inicial y presets epidemiológicos
+// ============================================================================
 
 struct DiseasePreset {
     const char* name;
@@ -1930,6 +1998,7 @@ LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+// Muestra el diálogo inicial de configuración (población, preset y réplicas)
 bool show_launcher_dialog(
     HINSTANCE hinst,
     int& num_agents,
@@ -2091,6 +2160,10 @@ bool show_launcher_dialog(
 }
 
 } // namespace
+
+// ============================================================================
+// 9. Punto de entrada (main: CLI benchmark, ventana Win32/GL y worker CUDA)
+// ============================================================================
 
 int main(int argc, char** argv) {
     _putenv_s("OMP_WAIT_POLICY", "PASSIVE");
@@ -2459,24 +2532,8 @@ int main(int argc, char** argv) {
                 }
             };
 
-            if (!g_paused.load()) {
-                auto step_t0 = std::chrono::steady_clock::now();
-                bool want_stats = (std::chrono::duration<double>(step_t0 - last_stats_time).count() >= 0.20);
-
-                seird::cuda_timer_begin();
-                const double beta_kin = seird::compute_abm_kinetic_beta(num_agents, local_params);
-                for (int s = 0; s < local_substeps; ++s) {
-                    bool is_last = (s == local_substeps - 1);
-                    const bool sample_now = want_stats && is_last;
-                    seird::cuda_step_simulation(
-                        dev, local_params, nullptr, stats, sample_now,
-                        (sample_now && local_params.num_replicas > 1) ? &rep_stats : nullptr
-                    );
-                    ode_ref = seird::ode_seirds_step_rk4(ode_ref, beta_kin, local_params, static_cast<double>(local_params.dt));
-                }
-
-                if (want_stats) {
-                    last_stats_time = step_t0;
+            auto record_and_publish = [&](bool update_stats) {
+                if (update_stats) {
                     metrics = telemetry.update(stats, local_params);
                     float tot = static_cast<float>(std::max(1, num_agents));
                     float i_frac = static_cast<float>(stats.count_i) / tot;
@@ -2505,7 +2562,6 @@ int main(int argc, char** argv) {
 
                 seird::cuda_render_1080p_device(dev, local_params);
                 double gpu_ms = static_cast<double>(seird::cuda_timer_end_ms());
-
                 {
                     std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
                     seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
@@ -2517,7 +2573,7 @@ int main(int argc, char** argv) {
                     pub_gpu_ms = gpu_ms;
                     pub_family = fam_info;
                     ++pub_sim_frames;
-                    if (want_stats) {
+                    if (update_stats) {
                         pub_metrics     = metrics;
                         pub_ensemble    = ens_metrics;
                         pub_curve_hist  = curve_hist;
@@ -2527,6 +2583,25 @@ int main(int argc, char** argv) {
                     }
                 }
                 g_frame_ready.store(true);
+            };
+
+            if (!g_paused.load()) {
+                auto step_t0 = std::chrono::steady_clock::now();
+                bool want_stats = (std::chrono::duration<double>(step_t0 - last_stats_time).count() >= 0.20);
+
+                seird::cuda_timer_begin();
+                const double beta_kin = seird::compute_abm_kinetic_beta(num_agents, local_params);
+                for (int s = 0; s < local_substeps; ++s) {
+                    const bool sample_now = want_stats && (s == local_substeps - 1);
+                    seird::cuda_step_simulation(
+                        dev, local_params, nullptr, stats, sample_now,
+                        (sample_now && local_params.num_replicas > 1) ? &rep_stats : nullptr
+                    );
+                    ode_ref = seird::ode_seirds_step_rk4(ode_ref, beta_kin, local_params, static_cast<double>(local_params.dt));
+                }
+
+                if (want_stats) last_stats_time = step_t0;
+                record_and_publish(want_stats);
 
                 // Control de cadencia para preservar cámara lenta en 1 paso/frame sin frenar cargas pesadas
                 const double target_sim_ms = (local_substeps == 1) ? 33.3 : 16.6;
@@ -2545,53 +2620,7 @@ int main(int argc, char** argv) {
                         (local_params.num_replicas > 1) ? &rep_stats : nullptr
                     );
                     ode_ref = seird::ode_seirds_step_rk4(ode_ref, beta_kin, local_params, static_cast<double>(local_params.dt));
-
-                    metrics = telemetry.update(stats, local_params);
-                    float tot = static_cast<float>(std::max(1, num_agents));
-                    float i_frac = static_cast<float>(stats.count_i) / tot;
-                    float i05 = i_frac, i50 = i_frac, i95 = i_frac;
-                    if (local_params.num_replicas > 1 && !rep_stats.empty()) {
-                        ens_metrics = ensemble.update(rep_stats, local_params, num_agents);
-                        metrics.rt_p05       = ens_metrics.rt_p05;
-                        metrics.rt_p95       = ens_metrics.rt_p95;
-                        metrics.prob_rt_gt_1 = ens_metrics.prob_rt_gt_1;
-                        i05 = ens_metrics.i_p05;
-                        i50 = ens_metrics.i_p50;
-                        i95 = ens_metrics.i_p95;
-                    }
-                    curve_hist.push_back({
-                        stats.sim_day,
-                        static_cast<float>(stats.count_s) / tot,
-                        static_cast<float>(stats.count_e) / tot,
-                        i_frac,
-                        static_cast<float>(stats.count_r) / tot,
-                        static_cast<float>(stats.count_d) / tot,
-                        static_cast<float>(ode_ref.i) / tot,
-                        i05, i50, i95
-                    });
-                    if (curve_hist.size() > 2048) curve_hist.pop_front();
-
-                    seird::cuda_render_1080p_device(dev, local_params);
-                    double gpu_ms = static_cast<double>(seird::cuda_timer_end_ms());
-                    {
-                        std::lock_guard<std::mutex> fb_lk(g_fb_mtx);
-                        seird::cuda_copy_framebuffer_to_device(dev, d_fb_display);
-                    }
-                    {
-                        update_family_pub();
-                        std::lock_guard<std::mutex> pub_lk(g_publish_mtx);
-                        pub_stats       = stats;
-                        pub_gpu_ms      = gpu_ms;
-                        pub_family      = fam_info;
-                        pub_metrics     = metrics;
-                        pub_ensemble    = ens_metrics;
-                        pub_curve_hist  = curve_hist;
-                        pub_history     = telemetry.history();
-                        pub_ens_history = ensemble.history();
-                        pub_rep_stats   = rep_stats;
-                        ++pub_sim_frames;
-                    }
-                    g_frame_ready.store(true);
+                    record_and_publish(true);
                     g_force_ui_stats.store(true);
                 } else if (g_force_render.exchange(false)) {
                     update_family_pub();
@@ -2794,21 +2823,7 @@ int main(int argc, char** argv) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            int wd = static_cast<int>(ui_stats.sim_day);
-            int tm = static_cast<int>(std::round((ui_stats.sim_day - static_cast<float>(wd)) * 24.0f * 60.0f));
-            int hh = (tm / 60) % 24;
-            int mm = tm % 60;
-            float fh = static_cast<float>(hh) + static_cast<float>(mm) / 60.0f;
-            bool wknd = ((wd % 7) >= 5);
-            const char* ph = wknd
-                ? ((hh >= 20 || hh < 6) ? "Noche (Wknd)" : "Ocio/Hogar")
-                : ((hh >= 6 && fh < 8.5f) ? "Traslado Ida"
-                    : ((fh >= 8.5f && fh < 17.5f) ? "Dia Laboral"
-                        : ((fh >= 17.5f && hh < 20) ? "Retorno" : "Noche")));
-            const char* cname = (cam_snap.urban_preset == seird::PRESET_MONOCENTRIC)
-                ? "Monocentrica"
-                : ((cam_snap.urban_preset == seird::PRESET_POLYCENTRIC) ? "Policentrica" : "Organico");
-            bool is_night = (hh >= 20 || hh < 6);
+            const SimClockInfo clk = compute_sim_clock(ui_stats.sim_day, cam_snap.urban_preset);
 
             // Caja HUD reloj (arriba izquierda en vista normal; abajo derecha en Mosaico para no tapar #0..#2)
             float hx0 = is_mosaic_ui ?  0.22f  : -0.98f;
@@ -2823,17 +2838,17 @@ int main(int argc, char** argv) {
                 glVertex2f(hx0, hy0); glVertex2f(hx1, hy0);
                 glVertex2f(hx1, hy1); glVertex2f(hx0, hy1);
             glEnd();
-            if (is_night) glColor3f(0.38f, 0.65f, 0.98f);
-            else          glColor3f(0.98f, 0.80f, 0.08f);
+            if (clk.is_night) glColor3f(0.38f, 0.65f, 0.98f);
+            else              glColor3f(0.98f, 0.80f, 0.08f);
             glRectf(hx0 + 0.015f, hy0 + 0.018f, hx0 + 0.035f, hy1 - 0.018f);
 
             char hud_clk[128];
             if (cam_snap.num_replicas > 1 && !cam_snap.ensemble_grid_view) {
-                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | Rep #%d [G: Grid]", wd, hh, mm, cam_snap.focused_replica);
+                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | Rep #%d [G: Grid]", clk.days, clk.hours, clk.mins, cam_snap.focused_replica);
             } else if (is_mosaic_ui) {
-                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | Mosaico K=%d (Clic: ampliar)", wd, hh, mm, cam_snap.num_replicas);
+                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | Mosaico K=%d (Clic: ampliar)", clk.days, clk.hours, clk.mins, cam_snap.num_replicas);
             } else {
-                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | %s | %s", wd, hh, mm, ph, cname);
+                std::snprintf(hud_clk, sizeof(hud_clk), "Dia %d %02d:%02d | %s | %s", clk.days, clk.hours, clk.mins, clk.phase, clk.city);
             }
             glColor3f(0.94f, 0.96f, 0.99f);
             draw_gl_text(hx0 + 0.048f, hy0 + 0.020f, hud_clk);
@@ -2842,15 +2857,7 @@ int main(int argc, char** argv) {
             if (is_mosaic_ui) {
                 int cols = 1, rows = 1;
                 int kr = cam_snap.num_replicas;
-                if (kr == 2)       { cols = 2; rows = 1; }
-                else if (kr <= 4)  { cols = 2; rows = 2; }
-                else if (kr <= 6)  { cols = 3; rows = 2; }
-                else if (kr <= 8)  { cols = 4; rows = 2; }
-                else if (kr <= 12) { cols = 4; rows = 3; }
-                else if (kr <= 16) { cols = 4; rows = 4; }
-                else if (kr <= 24) { cols = 6; rows = 4; }
-                else if (kr <= 32) { cols = 8; rows = 4; }
-                else { cols = 8; rows = (kr + 7) / 8; }
+                seird::compute_mosaic_grid(kr, cols, rows);
                 float tile_ndc_w = 2.0f / static_cast<float>(cols);
                 float tile_ndc_h = 1.56f / static_cast<float>(rows);
                 for (int r = 0; r < kr; ++r) {
@@ -2977,21 +2984,7 @@ int main(int argc, char** argv) {
                 params_snap = g_params;
             }
 
-            int whole_days = static_cast<int>(ui_stats.sim_day);
-            int total_mins = static_cast<int>(std::round((ui_stats.sim_day - static_cast<float>(whole_days)) * 24.0f * 60.0f));
-            int hours      = (total_mins / 60) % 24;
-            int mins       = total_mins % 60;
-            float fhours   = static_cast<float>(hours) + static_cast<float>(mins) / 60.0f;
-            bool is_wknd   = ((whole_days % 7) >= 5);
-            const char* phase_str = is_wknd
-                ? ((hours >= 20 || hours < 6) ? "Noche (Wknd)" : "Ocio/Hogar")
-                : ((hours >= 6 && fhours < 8.5f) ? "Traslado Ida"
-                    : ((fhours >= 8.5f && fhours < 17.5f) ? "Dia Laboral"
-                        : ((fhours >= 17.5f && hours < 20) ? "Retorno" : "Noche")));
-
-            const char* urban_str = (params_snap.urban_preset == seird::PRESET_MONOCENTRIC)
-                ? "Monocentrica"
-                : ((params_snap.urban_preset == seird::PRESET_POLYCENTRIC) ? "Policentrica" : "Organico");
+            const SimClockInfo clk = compute_sim_clock(ui_stats.sim_day, params_snap.urban_preset);
 
             char urban_line[160] = "";
             if (params_snap.enable_urban_layout) {
@@ -3002,7 +2995,7 @@ int main(int argc, char** argv) {
                     urban_line, sizeof(urban_line),
                     "\nCiudad [U]: %s | %s%s\n"
                     "Orig%% H:%.0f T:%.0f Tr:%.0f Hp:%.0f | Hosp:%u",
-                    urban_str, phase_str,
+                    clk.city, clk.phase,
                     params_snap.household_quarantine ? " [Q-Hog]" : (params_snap.close_schools_work ? " [Cierre]" : ""),
                     100.0f * static_cast<float>(ui_stats.src_home) / denom,
                     100.0f * static_cast<float>(ui_stats.src_work) / denom,
@@ -3011,7 +3004,7 @@ int main(int argc, char** argv) {
                     ui_stats.hospitalized_count
                 );
             } else {
-                std::snprintf(urban_line, sizeof(urban_line), "\nCiudad [U]: %s | %s", urban_str, phase_str);
+                std::snprintf(urban_line, sizeof(urban_line), "\nCiudad [U]: %s | %s", clk.city, clk.phase);
             }
 
             const float inf_pct = (num_agents > 0)
@@ -3054,7 +3047,7 @@ int main(int argc, char** argv) {
                 "VRAM: %.0f / %.0f MB (%.1f%%) | Seed: %llu",
                 num_agents,
                 (params_snap.num_replicas > 1) ? " x K" : " personas",
-                ui_stats.sim_day, whole_days, hours, mins, ui_metrics.rt, ui_metrics.rt_p05, ui_metrics.rt_p95,
+                ui_stats.sim_day, clk.days, clk.hours, clk.mins, ui_metrics.rt, ui_metrics.rt_p05, ui_metrics.rt_p95,
                 ui_metrics.prob_rt_gt_1 * 100.0f, seird::rt_category_label(ui_metrics.rt_category), ui_metrics.r0_ngm, ui_metrics.new_cases_rate,
                 ens_line, urban_line,
                 ui_stats.count_s, ui_stats.count_e, ui_stats.count_i, ui_stats.count_r, ui_stats.count_d,
