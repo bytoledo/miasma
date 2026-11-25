@@ -1948,8 +1948,8 @@ LRESULT CALLBACK LauncherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 st->chart_days = read_edit_int(st->edt_chart, 30, 2, 120);
                 st->params.render_mode   = static_cast<int>(SendMessageA(st->cmb_view, CB_GETCURSEL, 0, 0));
                 const int rep_sel        = static_cast<int>(SendMessageA(st->cmb_replicas, CB_GETCURSEL, 0, 0));
-                constexpr int kRepChoices[] = { 1, 8, 16, 32 };
-                const int k_rep = (rep_sel >= 0 && rep_sel < 4) ? kRepChoices[rep_sel] : 1;
+                constexpr int kRepChoices[] = { 1, 8, 16, 32, 64 };
+                const int k_rep = (rep_sel >= 0 && rep_sel < 5) ? kRepChoices[rep_sel] : 1;
                 st->params.num_replicas  = k_rep;
                 st->params.ensemble_grid_view = (k_rep > 1);
                 st->params.focused_replica    = 0;
@@ -2122,6 +2122,7 @@ bool show_launcher_dialog(
     SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("8"));
     SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("16"));
     SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("32"));
+    SendMessageA(st.cmb_replicas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("64"));
     SendMessageA(st.cmb_replicas, CB_SETCURSEL, 0, 0);
 
     st.chk_trails = mk("BUTTON", "Activar estelas de movimiento", BS_AUTOCHECKBOX, COL_L, 402, 240, 22);
