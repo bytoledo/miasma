@@ -1,33 +1,33 @@
-# Marco Teórico y Fundamentación Científica — `seird-Parallel`
+# Theoretical Framework and Scientific Foundation — `seird-Parallel`
 
-Este documento establece el sustento matemático, epidemiológico y metodológico del motor de simulación **seird-Parallel** ([PROJECT_PLAN.md](PROJECT_PLAN.md)), articulando la teoría compartimental clásica, sus extensiones modernas (estocásticas, espaciales, metapoblacionales y basadas en agentes) y los estándares operativos de salud pública con las decisiones concretas implementadas en el repositorio. Todas las citas bibliográficas corresponden a las entradas definidas en [referencias.bib](referencias.bib).
-
----
-
-## 1. Introducción y evolución histórica de la epidemiología matemática
-
-Aunque el estudio cuantitativo de la mortalidad por enfermedades infecciosas se remonta al siglo XVIII, la epidemiología matemática moderna se consolida a comienzos del siglo XX a partir de las investigaciones pioneras de Ronald Ross y Hilda Hudson (1915–1917) y, de forma decisiva, con la publicación en 1927 del trabajo fundacional de **William Ogilvy Kermack y Anderson Gray McKendrick** `[kermack1927contribution]`. Su formulación original —planteada inicialmente en términos de edad de infección antes de reducirse al caso markoviano de tasas constantes— demostró matemáticamente un resultado que ni la medicina ni la epidemiología empírica habían deducido previamente: la existencia de un **umbral epidémico** que determina si un patógeno desencadena un brote exponencial o se extingue sin agotar a la población susceptible `[kermack1927contribution]`, `[luque2020como]`.
-
-A lo largo de las décadas posteriores, este núcleo teórico se expandió en tratados de referencia como los de Anderson y May `[anderson1991infectious]` y Keeling y Rohani `[keeling2008modeling]`, así como en la sistematización rigurosa de Hethcote `[hethcote2000mathematics]`. Como sintetiza Brauer `[brauer2017mathematical]`, la disciplina evolucionó desde **modelos estratégicos** —deliberadamente simples, orientados a iluminar mecanismos cualitativos universales como el umbral de invasión, el pico de contagios o la inmunidad de grupo— hacia **modelos tácticos** de alta resolución destinados a evaluar intervenciones sanitarias específicas en tiempo real.
-
-La relevancia práctica de ambos niveles queda documentada en la evidencia histórica de la pandemia de gripe de 1918–1919 y en la respuesta a la COVID-19:
-
-* **Lecciones de la gripe de 1918 (43 ciudades de EE. UU.):** El análisis retrospectivo de Markel et al. `[markel2007nonpharmaceutical]` (discutido también en `[luque2020como]`) mostró que medidas no farmacológicas (NPI) aplicadas tempranamente y sostenidas en el tiempo —como en San Luis frente a Pittsburgh— redujeron los picos semanales de mortalidad hasta en un **50 %** y la mortalidad total acumulada alrededor de un **20 %**, mientras que el levantamiento prematuro de restricciones al remitir la primera ola provocó **segundos picos infecciosos**.
-* **Dinámica inicial de la COVID-19:** Durante marzo de 2020, las gráficas semilogarítmicas de casos confirmados exhibieron el crecimiento exponencial predicho por la teoría linealizada, aunque con pendientes muy distintas según la dinámica social y las medidas adoptadas (por ejemplo, $0{,}32$ en España frente a $0{,}085$ en Japón entre el 1 y el 16 de marzo de 2020; tras la implantación del estado de alarma en España el 14 de marzo, el número básico de reproducción estimado descendió de $\sim 2{,}5$ a $\sim 1{,}9$) `[luque2020como]`. Asimismo, modelos individuales de gran escala desarrollados desde mediados de la década de 2000 `[ferguson2006strategies]` sirvieron de base directa para las evaluaciones de demanda hospitalaria y unidades de cuidados intensivos (UCI) durante la emergencia de 2020 `[ferguson2020report9]`.
+This document establishes the mathematical, epidemiological, and methodological foundation of the **seird-Parallel** simulation engine ([PROJECT_PLAN.md](PROJECT_PLAN.md)), connecting classical compartmental theory, its modern extensions (stochastic, spatial, metapopulation, and agent-based), and operational public health standards with the concrete design decisions implemented in the repository. All bibliographic citations correspond to entries defined in [referencias.bib](referencias.bib).
 
 ---
 
-## 2. Fundamentos matemáticos de los modelos compartimentales
+## 1. Introduction and Historical Evolution of Mathematical Epidemiology
 
-### 2.1 El modelo SIR clásico
+Although the quantitative study of infectious disease mortality dates back to the 18th century, modern mathematical epidemiology was consolidated in the early 20th century through the pioneering work of Ronald Ross and Hilda Hudson (1915–1917) and, decisively, with the 1927 foundational paper by **William Ogilvy Kermack and Anderson Gray McKendrick** `[kermack1927contribution]`. Their original formulation—initially framed in terms of infection age before reducing to the Markovian constant-rate case—proved mathematically a result that neither clinical medicine nor empirical epidemiology had previously deduced: the existence of an **epidemic threshold** determining whether a pathogen triggers an exponential outbreak or dies out without exhausting the susceptible population `[kermack1927contribution]`, `[luque2020como]`.
 
-En su versión determinista estándar para una población cerrada de tamaño $N$ y mezcla homogénea, el modelo de Kermack y McKendrick divide a los individuos en tres compartimentos según su estado epidemiológico (`S -> I -> R`) `[kermack1927contribution]`, `[luque2020como]`, `[idm2026modelinghub]`:
+Over subsequent decades, this theoretical core expanded in reference treatises such as Anderson and May `[anderson1991infectious]` and Keeling and Rohani `[keeling2008modeling]`, as well as Hethcote's rigorous systematization `[hethcote2000mathematics]`. As synthesized by Brauer `[brauer2017mathematical]`, the discipline evolved from **strategic models**—deliberately simple, aimed at illuminating universal qualitative mechanisms such as the invasion threshold, epidemic peak, and herd immunity—toward high-resolution **tactical models** designed to evaluate specific public health interventions in real time.
 
-* **$S(t)$ (Susceptibles):** individuos no inmunes en riesgo de contraer la infección.
-* **$I(t)$ (Infectados):** individuos infectados capaces de transmitir el patógeno.
-* **$R(t)$ (Recuperados):** individuos que han superado la infección, adquieren inmunidad y dejan de transmitir.
+The practical relevance of both levels is documented in the historical evidence from the 1918–1919 influenza pandemic and the COVID-19 response:
 
-La conservación de la población impone $N = S(t) + I(t) + R(t)$. Suponiendo que cada individuo infectado realiza $\mu$ contactos diarios efectivos en promedio, de los cuales una fracción $S(t)/N$ ocurre con susceptibles y una proporción $\tau \le 1$ resulta en contagio, se define la constante de transmisión $\beta = \tau \mu / N$ (en formulación no normalizada) y la tasa de recuperación $\gamma = 1/D$, siendo $D$ el tiempo medio de infecciosidad en días. En el límite continuo, el sistema de ecuaciones diferenciales ordinarias (EDO) es `[luque2020como]`:
+* **Lessons from the 1918 Influenza Pandemic (43 U.S. cities):** Retrospective analysis by Markel et al. `[markel2007nonpharmaceutical]` (also discussed in `[luque2020como]`) showed that non-pharmaceutical interventions (NPIs) implemented early and sustained over time—as in St. Louis compared to Pittsburgh—reduced weekly peak mortality by up to **50%** and total cumulative mortality by roughly **20%**, whereas premature lifting of restrictions as the first wave subsided triggered **second infectious peaks**.
+* **Early COVID-19 Dynamics:** During March 2020, semi-logarithmic plots of confirmed cases exhibited the exponential growth predicted by linearized theory, albeit with markedly different slopes depending on social dynamics and adopted measures (e.g., $0.32$ in Spain vs. $0.085$ in Japan between March 1 and March 16, 2020; following Spain's state of alarm on March 14, the estimated reproduction number dropped from $\sim 2.5$ to $\sim 1.9$) `[luque2020como]`. Likewise, large-scale individual-based models developed since the mid-2000s `[ferguson2006strategies]` formed the direct basis for hospital and intensive care unit (ICU) demand assessments during the 2020 emergency `[ferguson2020report9]`.
+
+---
+
+## 2. Mathematical Foundations of Compartmental Models
+
+### 2.1 The Classical SIR Model
+
+In its standard deterministic version for a closed, homogeneously mixed population of size $N$, the Kermack–McKendrick model divides individuals into three compartments by epidemiological state (`S -> I -> R`) `[kermack1927contribution]`, `[luque2020como]`, `[idm2026modelinghub]`:
+
+* **$S(t)$ (Susceptible):** non-immune individuals at risk of contracting the infection.
+* **$I(t)$ (Infected):** infected individuals capable of transmitting the pathogen.
+* **$R(t)$ (Recovered):** individuals who have cleared the infection, acquired immunity, and ceased transmitting.
+
+Population conservation enforces $N = S(t) + I(t) + R(t)$. Assuming each infected individual makes an average of $\mu$ effective daily contacts, of which a fraction $S(t)/N$ occurs with susceptibles and a proportion $\tau \le 1$ results in transmission, the transmission constant is defined as $\beta = \tau \mu / N$ (in unnormalized form) and the recovery rate as $\gamma = 1/D$, where $D$ is the mean infectious period in days. In the continuous limit, the system of ordinary differential equations (ODEs) is `[luque2020como]`:
 
 $$
 \frac{dS}{dt} = -\beta S(t) I(t), \qquad
@@ -35,50 +35,50 @@ $$
 \frac{dR}{dt} = \gamma I(t)
 $$
 
-*(Nota de notación: en la formulación normalizada estándar usada por el IDM `[idm2026modelinghub]` y otros autores, $\beta_{\text{norm}} = \tau\mu$ absorbe el factor $1/N$ de modo que la incidencia se escribe $\beta_{\text{norm}} S I / N$ y $R_0 = \beta_{\text{norm}}/\gamma$.)*
+*(Notation note: in the standard normalized formulation used by IDM `[idm2026modelinghub]` and other authors, $\beta_{\text{norm}} = \tau\mu$ absorbs the $1/N$ factor so that incidence is written $\beta_{\text{norm}} S I / N$ and $R_0 = \beta_{\text{norm}}/\gamma$.)*
 
-A partir de este sistema emergen analíticamente cinco propiedades fundamentales `[luque2020como]`, `[hethcote2000mathematics]`, `[idm2026modelinghub]`:
+Five fundamental properties emerge analytically from this system `[luque2020como]`, `[hethcote2000mathematics]`, `[idm2026modelinghub]`:
 
-1. **Fase inicial exponencial y umbral epidémico:** Al inicio del brote ($S(t) \approx S(0)$), la ecuación de infectados se linealiza a $I'(t) = (\beta S(0) - \gamma) I(t)$, cuya solución es:
+1. **Initial Exponential Phase and Epidemic Threshold:** At the onset of an outbreak ($S(t) \approx S(0)$), the infected equation linearizes to $I'(t) = (\beta S(0) - \gamma) I(t)$, yielding:
    $$
    I(t) = I(0)\exp\big((\beta S(0) - \gamma)t\big)
    $$
-   La epidemia solo crece si el **número efectivo de reproducción inicial** cumple $R_e = \beta S(0)/\gamma > 1$; en caso contrario se extingue. Cuando toda la población es inicialmente vulnerable ($S(0) = N$), $R_e$ coincide con el **número básico de reproducción**:
+   The epidemic grows only if the **initial effective reproduction number** satisfies $R_e = \beta S(0)/\gamma > 1$; otherwise it dies out. When the entire population is initially susceptible ($S(0) = N$), $R_e$ coincides with the **basic reproduction number**:
    $$
    R_0 = \frac{\beta N}{\gamma} = \tau \mu D
    $$
-   En escala semilogarítmica, tanto los casos diarios como los acumulados $A(t) = (I(0)/\alpha)e^{\alpha t}$ forman una recta de pendiente $\alpha = \gamma(R_0 - 1)$ `[luque2020como]`. En la literatura formal, Hethcote `[hethcote2000mathematics]` distingue con precisión entre el número básico de reproducción ($R_0$), el número de contacto ($\sigma$) y el número de reemplazo ($R$).
+   On a semi-logarithmic scale, both daily and cumulative cases $A(t) = (I(0)/\alpha)e^{\alpha t}$ form a straight line of slope $\alpha = \gamma(R_0 - 1)$ `[luque2020como]`. In formal literature, Hethcote `[hethcote2000mathematics]` distinguishes carefully between the basic reproduction number ($R_0$), the contact number ($\sigma$), and the replacement number ($R$).
 
-2. **Identidad fundamental del SIR:** Dividiendo las ecuaciones de $S(t)$ e $I(t)$ se obtiene $dS/dI = \beta S / (\gamma - \beta S)$, que al integrarse produce la invariante exacta:
+2. **Fundamental SIR Identity:** Dividing the $S(t)$ and $I(t)$ equations gives $dS/dI = \beta S / (\gamma - \beta S)$, which integrates to the exact invariant:
    $$
    I(t) + S(t) - \frac{\gamma}{\beta}\ln S(t) = I(0) + S(0) - \frac{\gamma}{\beta}\ln S(0)
    $$
 
-3. **Pico máximo de infectados («aplanar la curva»):** El máximo $I_{\text{máx}}$ se alcanza cuando $I'(t_{\text{máx}}) = 0 \implies S(t_{\text{máx}}) = \gamma/\beta = N/R_0$. Sustituyendo en la identidad fundamental (con $S(0) = N$ e $I(0) \approx 0$) resulta:
+3. **Maximum Infected Peak ("Flattening the Curve"):** The peak $I_{\max}$ occurs when $I'(t_{\max}) = 0 \implies S(t_{\max}) = \gamma/\beta = N/R_0$. Substituting into the fundamental invariant (with $S(0) = N$ and $I(0) \approx 0$) yields:
    $$
-   I_{\text{máx}} = N\left(1 - \frac{1 + \ln R_0}{R_0}\right)
+   I_{\max} = N\left(1 - \frac{1 + \ln R_0}{R_0}\right)
    $$
-   Esta relación cuantifica directamente cómo las intervenciones que disminuyen $\mu$ o $\tau$ reducen $R_0$ y abaten el pico de demanda hospitalaria $I_{\text{máx}}$ `[luque2020como]`, `[ferguson2020report9]`.
+   This relation directly quantifies how interventions that lower $\mu$ or $\tau$ reduce $R_0$ and suppress peak hospital demand $I_{\max}$ `[luque2020como]`, `[ferguson2020report9]`.
 
-4. **Tasa de ataque final:** Evaluando la identidad en $t \to \infty$ (donde $I(\infty) = 0$) se obtiene la ecuación implícita para la fracción de susceptibles remanentes:
+4. **Final Attack Rate:** Evaluating the invariant as $t \to \infty$ (where $I(\infty) = 0$) yields the implicit equation for the remaining susceptible fraction:
    $$
    \ln\left(\frac{S(\infty)}{N}\right) = -R_0\left(1 - \frac{S(\infty)}{N}\right)
    $$
-   Esto demuestra que, incluso sin intervenciones, una epidemia remite dejando una fracción $S(\infty)/N > 0$ sin infectar, por lo que la tasa de ataque $1 - S(\infty)/N$ es estrictamente menor que el $100\,\%$ `[luque2020como]`.
+   This proves that even without interventions, an epidemic subsides leaving a fraction $S(\infty)/N > 0$ uninfected, so the final attack rate $1 - S(\infty)/N$ is strictly less than $100\%$ `[luque2020como]`.
 
-5. **Inmunidad de grupo y umbral crítico de vacunación ($p_c$):** Si una fracción $p$ de la población es inmunizada al inicio ($R(0) = pN$, $S(0) = (1-p)N$), el umbral $R_e = \beta(1-p)N/\gamma = 1$ define la cobertura crítica necesaria para impedir el crecimiento epidémico `[luque2020como]`, `[idm2026modelinghub]`:
+5. **Herd Immunity and Critical Vaccination Threshold ($p_c$):** If a fraction $p$ of the population is immunized initially ($R(0) = pN$, $S(0) = (1-p)N$), the threshold $R_e = \beta(1-p)N/\gamma = 1$ defines the critical coverage required to prevent epidemic growth `[luque2020como]`, `[idm2026modelinghub]`:
    $$
    p_c = 1 - \frac{1}{R_0}
    $$
-   Por ejemplo, para enfermedades de alto $R_0$ como el sarampión o la rubeola ($p_c$ teórico $\sim 90\,\%$), al incorporar una eficacia vacunal imperfecta del $95\,\%$ las coberturas requeridas ascienden al $99\,\%$ y $91\,\%$ respectivamente (la viruela es hasta la fecha la única enfermedad infecciosa humana erradicada globalmente por vacunación); para el SARS-CoV-2 con $R_0 \approx 2{,}5$, $p_c$ se sitúa en el rango del $60\,\%$ al $75\,\%$ `[luque2020como]`.
+   For example, for high-$R_0$ diseases such as measles or rubella (theoretical $p_c \sim 90\%$), accounting for imperfect $95\%$ vaccine efficacy raises required coverage to $99\%$ and $91\%$, respectively (smallpox remains the only human infectious disease eradicated globally by vaccination); for SARS-CoV-2 with $R_0 \approx 2.5$, $p_c$ lies in the $60\%$–$75\%$ range `[luque2020como]`.
 
 ---
 
-### 2.2 Extensión a SEIR, SEIRD y SEIRDS con vacunación e inmunidad decreciente
+### 2.2 Extension to SEIR, SEIRD, and SEIRDS with Vaccination and Waning Immunity
 
-Para enfermedades con un periodo de latencia o incubación no despreciable y mortalidad específica significativa, el esquema SIR se amplía incorporando el compartimento **Expuesto ($E$)** —individuos infectados que aún no transmiten— y el compartimento **Fallecido ($D$)** `[raimundez2021covid]`, `[sudhi2022scalable]`, `[idm2026modelinghub]`, `[rama2026systematic]`.
+For diseases with a non-negligible latent/incubation period and significant disease-specific mortality, the SIR scheme is extended by adding the **Exposed ($E$)** compartment—infected individuals who do not yet transmit—and the **Deceased ($D$)** compartment `[raimundez2021covid]`, `[sudhi2022scalable]`, `[idm2026modelinghub]`, `[rama2026systematic]`.
 
-Incluyendo además una tasa diaria de vacunación $\nu_v$ ($S \to R$) y una tasa de pérdida de inmunidad $\xi = 1/T_{\text{inm}}$ ($R \to S$) en población cerrada sin demografía de fondo ($N = S + E + I + R + D$), el sistema **SEIRDS** queda formulado como:
+Also including a daily vaccination rate $\nu_v$ ($S \to R$) and an immunity waning rate $\xi = 1/T_{\text{imm}}$ ($R \to S$) in a closed population without background demography ($N = S + E + I + R + D$), the **SEIRDS** system is formulated as:
 
 $$
 \begin{aligned}
@@ -90,117 +90,117 @@ $$
 \end{aligned}
 $$
 
-donde:
-* $\beta$: tasa de transmisión efectiva (en unidades de $\text{día}^{-1}$, bajo incidencia estándar $\beta S I / N$).
-* $\sigma = 1 / T_{\text{incub}}$: tasa de progresión del estado latente al estado infeccioso.
-* $\gamma$: tasa de recuperación hacia $R$.
-* $\mu_d$: tasa de mortalidad específica por la enfermedad hacia $D$ (equivalente, en modelos parametrizados por duración media infecciosa $D_{\text{inf}}$ y probabilidad de letalidad $\alpha_{\text{fat}}$, a una tasa total de salida de $I$ igual a $1/D_{\text{inf}}$ repartida en $(1 - \alpha_{\text{fat}})/D_{\text{inf}}$ hacia $R$ y $\alpha_{\text{fat}}/D_{\text{inf}}$ hacia $D$).
+where:
+* $\beta$: effective transmission rate (in $\text{day}^{-1}$, under standard $\beta S I / N$ incidence).
+* $\sigma = 1 / T_{\text{incub}}$: progression rate from the latent state to the infectious state.
+* $\gamma$: recovery rate into $R$.
+* $\mu_d$: disease-specific mortality rate into $D$ (equivalent, in models parameterized by mean infectious duration $D_{\text{inf}}$ and case fatality probability $\alpha_{\text{fat}}$, to a total outflow rate from $I$ of $1/D_{\text{inf}}$ split into $(1 - \alpha_{\text{fat}})/D_{\text{inf}}$ toward $R$ and $\alpha_{\text{fat}}/D_{\text{inf}}$ toward $D$).
 
-Como documenta el *ModelingHub* del Institute for Disease Modeling (IDM) `[idm2026modelinghub]`, la inclusión del compartimento latente $E$ **ralentiza la tasa de crecimiento exponencial inicial** en comparación con el SIR equivalente; sin embargo, en población cerrada sin mortalidad ni pérdida de inmunidad ($\mu_d = \nu_v = \xi = 0$), deja inalterados tanto $R_0 = \beta/\gamma$ como el tamaño acumulado final de infectados. Cuando se activa la pérdida de inmunidad ($\xi > 0$, modelo SEIRDS/SEIRS) o el reemplazo demográfico, los susceptibles se reabastecen continuamente y el sistema admite equilibrios endémicos acompañados de ondas o rebrotes epidémicos amortiguados `[idm2026modelinghub]`, `[hethcote2000mathematics]`.
+As documented by the Institute for Disease Modeling (IDM) *ModelingHub* `[idm2026modelinghub]`, adding the latent compartment $E$ **slows the initial exponential growth rate** compared to the equivalent SIR model; however, in a closed population without mortality or waning immunity ($\mu_d = \nu_v = \xi = 0$), it leaves both $R_0 = \beta/\gamma$ and the final cumulative attack size unchanged. When waning immunity ($\xi > 0$, SEIRDS/SEIRS model) or demographic replacement is active, susceptibles are continuously replenished and the system admits endemic equilibria accompanied by damped epidemic waves or resurgences `[idm2026modelinghub]`, `[hethcote2000mathematics]`.
 
 ---
 
-### 2.3 Generalización de $R_0$ en sistemas complejos: Matriz de Siguiente Generación y dinámicas no lineales
+### 2.3 Generalizing $R_0$ in Complex Systems: Next-Generation Matrix and Nonlinear Dynamics
 
-En modelos con múltiples compartimentos infectivos (por ejemplo, $E$, $I$ asintomáticos, $I$ sintomáticos, múltiples grupos de riesgo o parches espaciales), la fórmula escalar $\beta/\gamma$ deja de ser suficiente. El método estándar para derivar $R_0$ de manera rigurosa es el **Operador / Matriz de Siguiente Generación (NGM)** formulado por van den Driessche y Watmough `[vandendriessche2002reproduction]` y Diekmann, Heesterbeek y Roberts `[diekmann2010construction]`:
+In models with multiple infectious compartments (e.g., $E$, asymptomatic $I$, symptomatic $I$, multiple risk groups, or spatial patches), the scalar formula $\beta/\gamma$ is no longer sufficient. The standard method to rigorously derive $R_0$ is the **Next-Generation Operator / Matrix (NGM)** formulated by van den Driessche and Watmough `[vandendriessche2002reproduction]` and Diekmann, Heesterbeek, and Roberts `[diekmann2010construction]`:
 
-1. Se agrupan los compartimentos infectivos en un vector $x \in \mathbb{R}^m$ y se descompone su dinámica como $\dot{x}_i = \mathcal{F}_i(x) - \mathcal{V}_i(x)$, donde $\mathcal{F}_i$ representa la aparición de *nuevas infecciones* y $\mathcal{V}_i$ agrupa las transiciones internas entre estados infectivos y salidas (recuperación o muerte).
-2. Evaluando los jacobianos en el **equilibrio libre de enfermedad (DFE)** $x_0$:
+1. Group infectious compartments into a vector $x \in \mathbb{R}^m$ and decompose their dynamics as $\dot{x}_i = \mathcal{F}_i(x) - \mathcal{V}_i(x)$, where $\mathcal{F}_i$ represents the appearance of *new infections* and $\mathcal{V}_i$ aggregates internal transitions between infectious states and outflows (recovery or death).
+2. Evaluate the Jacobians at the **disease-free equilibrium (DFE)** $x_0$:
    $$
    F = \left[\frac{\partial \mathcal{F}_i}{\partial x_j}(x_0)\right], \qquad V = \left[\frac{\partial \mathcal{V}_i}{\partial x_j}(x_0)\right]
    $$
-3. El número básico de reproducción queda definido por el radio espectral de la matriz de siguiente generación $K = FV^{-1}$:
+3. The basic reproduction number is defined by the spectral radius of the next-generation matrix $K = FV^{-1}$:
    $$
    R_0 = \rho(FV^{-1})
    $$
-   bajo las condiciones de estabilidad del DFE establecidas en `[vandendriessche2002reproduction]`.
+   under the DFE stability conditions established in `[vandendriessche2002reproduction]`.
 
-Además del análisis lineal alrededor del DFE, la literatura moderna advierte sobre comportamientos que escapan a los modelos simples `[brauer2017mathematical]`:
-* **Bifurcaciones hacia atrás (*backward bifurcations*):** En modelos multigrupo o con asimetrías estructurales, pueden coexistir equilibrios endémicos estables incluso cuando $R_0 < 1$, lo que implica que reducir $R_0$ por debajo de $1$ no siempre garantiza por sí solo la eliminación inmediata de la enfermedad `[vandendriessche2002reproduction]`, `[brauer2017mathematical]`.
-* **Extinción estocástica temprana y superdispersión:** Mediante procesos de ramificación de Galton–Watson y funciones generatrices de redes de contacto $G_0(z) = \sum_k p_k z^k$, Brauer `[brauer2017mathematical]` demuestra que incluso cuando $R_0 > 1$, existe una probabilidad positiva $z_\infty \in (0, 1)$ de que el brote se extinga de forma aleatoria antes de convertirse en una epidemia mayor, y que la heterogeneidad individual (eventos de superdispersión) desacelera la tasa de crecimiento inicial respecto a la predicción exponencial de mezcla homogénea `[brauer2017mathematical]`, `[estrada2020covid]`.
+Beyond linear analysis around the DFE, modern literature highlights behaviors that simple models miss `[brauer2017mathematical]`:
+* **Backward bifurcations:** In multi-group or structurally asymmetric models, stable endemic equilibria can coexist even when $R_0 < 1$, implying that reducing $R_0$ below $1$ does not always guarantee immediate disease elimination `[vandendriessche2002reproduction]`, `[brauer2017mathematical]`.
+* **Early stochastic extinction and superspreading:** Using Galton–Watson branching processes and contact-network generating functions $G_0(z) = \sum_k p_k z^k$, Brauer `[brauer2017mathematical]` shows that even when $R_0 > 1$, there is a positive probability $z_\infty \in (0, 1)$ that an outbreak dies out randomly before becoming a major epidemic, and that individual heterogeneity (superspreading events) slows the initial growth rate relative to the homogeneous-mixing exponential prediction `[brauer2017mathematical]`, `[estrada2020covid]`.
 
 ---
 
-## 3. Taxonomía comparativa de paradigmas de modelado epidemiológico
+## 3. Comparative Taxonomy of Epidemiological Modeling Paradigms
 
-La elección del paradigma de modelado responde a un compromiso entre tratabilidad analítica, realismo estructural, requerimientos de datos y costo computacional. La siguiente tabla resume los seis paradigmas principales documentados en las fuentes revisadas:
+Choosing a modeling paradigm involves a trade-off between analytical tractability, structural realism, data requirements, and computational cost. The following table summarizes the six main paradigms documented in the reviewed sources:
 
-| Paradigma | Formalismo matemático | Fortalezas principales | Limitaciones clave | Referencias representativas |
+| Paradigm | Mathematical Formalism | Key Strengths | Key Limitations | Representative References |
 | :--- | :--- | :--- | :--- | :--- |
-| **Compartimental determinista (SIR / SEIR / SEIRD)** | Sistemas de EDO acopladas | Analíticamente tratable ($R_0$, umbral, $I_{\text{máx}}$, tasa de ataque); costo computacional mínimo; ideal como referencia base | Asume mezcla homogénea e infinita divisibilidad; inadecuado para brotes pequeños, geografía explícita o heterogeneidad individual | `[kermack1927contribution]`, `[hethcote2000mathematics]`, `[brauer2017mathematical]`, `[idm2026modelinghub]` |
-| **Estratificado y metapoblacional** | EDO acopladas con matrices de contacto $C_{aa'}$ y movilidad entre parches | Incorpora grupos de edad, $\text{IFR}_a$ diferenciada y flujos geográficos entre regiones | Alta dimensionalidad; resultados y $R_0$ muy sensibles al modelo de movilidad: flujo **Euleriano** (sin memoria de origen) vs. viaje **Lagrangiano** (*Simple Trip*, matriz $\Psi_{ij}$) | `[vandendriessche2002reproduction]`, `[citron2021comparing]`, `[arenas2020derivation]`, `[rama2026systematic]` |
-| **Espacial continuo (Reacción–Difusión)** | EDP parabólicas no lineales + FEM / diferencias finitas | Captura frentes de propagación continua, difusión dependiente de densidad, efecto Allee y fronteras geográficas (condiciones de Neumann); altamente escalable en MPI/GPU | Requiere mallas geográficas finas, condiciones de contorno y *solvers* paralelos complejos (p. ej., Euler implícito + descomposición RAS + AMG) | `[sudhi2022scalable]` |
-| **Estocástico / procesos de ramificación** | Cadenas de Markov, *chain-binomial*, Gillespie, Galton–Watson, binomial negativa | Modela extinción aleatoria temprana, varianza finita, incertidumbre intrínseca y superdispersión | Requiere ensambles de miles de réplicas Monte Carlo; mayor costo de cómputo si no se paraleliza | `[brauer2017mathematical]`, `[estrada2020covid]`, `[rama2026systematic]` |
-| **Basado en agentes (ABM / Microsimulación)** | Autómatas / partículas discretas con interacción espacial o en red | Máxima expresividad para heterogeneidad individual, grupos de riesgo, movilidad urbana y NPIs focalizadas; representó el **47,7 %** de los estudios espaciales COVID-19 (frente al **29,4 %** de EDO/EDP) | Complejidad de calibración e identificabilidad; alto consumo de memoria y complejidad $O(N^2)$ ingenua si no se emplean estructuras espaciales $O(N)$ | `[ferguson2006strategies]`, `[ferguson2020report9]`, `[oshinubi2026systematic]` |
-| **Estadístico / Híbrido (GAM, Bayesiano, PINN)** | GAM jerárquico, MCMC, ABC-SMC, Redes Neuronales Informadas por Física (PINN) | Excelente para *nowcasting* de rezagos de reporte y estimación operativa de $R_t$ con intervalos creíbles | Menor extrapolación contrafactual fuera de régimen; las PINN mostraron intervalos predictivos sobreconfiados frente a ABC-SMC mecanicista en series ruidosas | `[cdc2026cfa]`, `[rama2026systematic]` |
+| **Deterministic Compartmental (SIR / SEIR / SEIRD)** | Coupled ODE systems | Analytically tractable ($R_0$, threshold, $I_{\max}$, attack rate); minimal compute cost; ideal baseline reference | Assumes homogeneous mixing and infinite divisibility; unsuitable for small outbreaks, explicit geography, or individual heterogeneity | `[kermack1927contribution]`, `[hethcote2000mathematics]`, `[brauer2017mathematical]`, `[idm2026modelinghub]` |
+| **Stratified & Metapopulation** | Coupled ODEs with contact matrices $C_{aa'}$ and inter-patch mobility | Incorporates age groups, age-specific $\text{IFR}_a$, and geographic flows between regions | High dimensionality; outputs and $R_0$ are highly sensitive to mobility model: **Eulerian** flux (origin-memoryless) vs. **Lagrangian** travel (*Simple Trip*, matrix $\Psi_{ij}$) | `[vandendriessche2002reproduction]`, `[citron2021comparing]`, `[arenas2020derivation]`, `[rama2026systematic]` |
+| **Continuous Spatial (Reaction–Diffusion)** | Nonlinear parabolic PDEs + FEM / finite differences | Captures continuous propagation fronts, density-dependent diffusion, Allee effect, and geographic boundaries (Neumann conditions); highly scalable on MPI/GPU | Requires fine geographic meshes, boundary conditions, and complex parallel solvers (e.g., implicit Euler + RAS decomposition + AMG) | `[sudhi2022scalable]` |
+| **Stochastic / Branching Processes** | Markov chains, *chain-binomial*, Gillespie, Galton–Watson, negative binomial | Models early random extinction, finite-size variance, intrinsic uncertainty, and superspreading | Requires ensembles of thousands of Monte Carlo replicas; high compute cost if not parallelized | `[brauer2017mathematical]`, `[estrada2020covid]`, `[rama2026systematic]` |
+| **Agent-Based (ABM / Microsimulation)** | Discrete automata / particles with spatial or network interaction | Maximum expressiveness for individual heterogeneity, risk groups, urban mobility, and targeted NPIs; represented **47.7%** of spatial COVID-19 studies (vs. **29.4%** for ODE/PDE) | Calibration and identifiability complexity; high memory footprint and naive $O(N^2)$ scaling without $O(N)$ spatial structures | `[ferguson2006strategies]`, `[ferguson2020report9]`, `[oshinubi2026systematic]` |
+| **Statistical / Hybrid (GAM, Bayesian, PINN)** | Hierarchical GAM, MCMC, ABC-SMC, Physics-Informed Neural Networks (PINNs) | Strong for reporting-lag *nowcasting* and operational $R_t$ estimation with credible intervals | Weak out-of-regime counterfactual extrapolation; PINNs showed overconfident predictive intervals compared to mechanistic ABC-SMC on noisy series | `[cdc2026cfa]`, `[rama2026systematic]` |
 
 ---
 
-## 4. Fundamentación científica de la arquitectura `seird-Parallel`
+## 4. Scientific Foundation of the `seird-Parallel` Architecture
 
-El motor `seird-Parallel` adopta un paradigma híbrido de alta escala: un **Modelo Basado en Agentes (ABM) con dinámica SEIRD estocástica en espacio 2D continuo** ejecutado masivamente en paralelo sobre GPU NVIDIA CUDA, acoplado a un módulo de telemetría estadística en CPU con OpenMP ([PROJECT_PLAN.md](PROJECT_PLAN.md), [include/types.hpp](include/types.hpp), [src/cpu_engine.cpp](src/cpu_engine.cpp)). En términos de la taxonomía **GPM (Geografía–Población–Movimiento)** introducida por Oshinubi et al. `[oshinubi2026systematic]`, el proyecto combina una arena geográfica 2D continua con malla de aceleración, una población discreta estratificada por riesgo (`RiskGroup`) y un movimiento estocástico con atracción hacia centros de actividad urbana (`urban_clustering`).
+The `seird-Parallel` engine adopts a large-scale hybrid paradigm: a **Stochastic SEIRD Agent-Based Model (ABM) in continuous 2D space** executed massively in parallel on NVIDIA CUDA GPUs, coupled to a CPU statistical telemetry module with OpenMP ([PROJECT_PLAN.md](PROJECT_PLAN.md), [include/types.hpp](../include/types.hpp), [src/cpu_engine.cpp](../src/cpu_engine.cpp)). In terms of the **GPM (Geography–Population–Movement)** taxonomy introduced by Oshinubi et al. `[oshinubi2026systematic]`, the project combines a continuous 2D geographic arena with an acceleration grid, a discrete population stratified by risk (`RiskGroup`), and stochastic movement attracted toward urban activity hubs (`urban_clustering`).
 
-La siguiente matriz vincula cada componente real del código con su fundamento científico:
+The matrix below links each code component to its scientific foundation:
 
-| Componente en `seird-Parallel` | Ubicación en el repositorio | Sustento teórico y evidencia científica |
+| Component in `seird-Parallel` | Repository Location | Theoretical & Scientific Basis |
 | :--- | :--- | :--- |
-| **Estados `AgentState` (`S, E, I, R, D`) y parámetros base** (`incubation_days = 5.0f`, `infectious_days = 10.0f`, `fatality_rate = 0.02f`, `dt = 1/48` días) | [include/types.hpp](include/types.hpp) | Refleja la transición $S \to E \to I \to \{R, D\}$ estándar para patógenos con periodo latente (`[idm2026modelinghub]`, `[raimundez2021covid]`). Los valores por defecto coinciden con órdenes de magnitud documentados para SARS-CoV-2 y gripe de 1918: incubación de 5–6 días (`[raimundez2021covid]`) y tasa de letalidad en torno al $2\,\%$ (`[luque2020como]`). |
-| **Estratificación `RiskGroup`** (`RISK_LOW` ~50 %, letalidad $0{,}25\times$; `RISK_MEDIUM` ~35 %, $1{,}0\times$; `RISK_HIGH` ~15 %, letalidad $3{,}5\times$) | [include/types.hpp](include/types.hpp) | Responde a una de las carencias centrales del SIR homogéneo señaladas en `[luque2020como]`, `[hethcote2000mathematics]` y `[rama2026systematic]`: la movilidad y la razón de letalidad por infección ($\text{IFR}_a$) varían drásticamente a lo largo de la pirámide poblacional (alto riesgo en mayores de 70 años frente a población joven). |
-| **Espacio continuo 2D, `urban_clustering` y *Spatial Hashing* $O(N)$ con `cub::DeviceRadixSort::SortPairs`** | [PROJECT_PLAN.md](PROJECT_PLAN.md), [include/types.hpp](include/types.hpp), [src/cuda_engine.cu](src/cuda_engine.cu) | Supera el supuesto irrealista de mezcla homogénea (`[luque2020como]`, `[arenas2020derivation]`, `[citron2021comparing]`). La malla uniforme con `cell_size >= infection_radius` reduce la búsqueda de vecinos de $O(N^2)$ a $O(N)$ en memoria SoA (*Structure of Arrays*), con reordenamiento físico coalescente y salto de celdas sin infectados (`[sudhi2022scalable]`, `[oshinubi2026systematic]`). |
-| **Layouts urbanos teselados (`UrbanZone`), familias (`home_id`, `work_zone`) y atribución `infection_source`** | [include/types.hpp](include/types.hpp), [src/cuda_engine.cu](src/cuda_engine.cu) | Operativiza la movilidad **Lagrangiana** con retorno al hogar (`[citron2021comparing]`, `[arenas2020derivation]`): distritos rectangulares 5×5 (`PRESET_MONOCENTRIC`, `PRESET_POLYCENTRIC`), ciclo día/noche y semanal (`dt = 1/48` d), mezcla intrafamiliar de `RiskGroup` y registro del entorno de contagio (`Hogar, Trabajo, Tránsito, Hospital, Ocio`). |
-| **Intervenciones (`quarantine_factor`, `focal_quarantine`, `household_quarantine`, `close_schools_work`, `vaccination_rate`, `immunity_days`) y `hospital_capacity_pct`** | [include/types.hpp](include/types.hpp), [src/cuda_engine.cu](src/cuda_engine.cu) | Modela NPIs globales, focalizadas por $Z$-score ($Z > 2{,}0$) y domiciliarias por hogar para abatir el contacto efectivo $\mu$ y el pico $I_{\text{máx}}$ respecto a la capacidad asistencial (`[luque2020como]`, `[ferguson2020report9]`, `[markel2007nonpharmaceutical]`). La vacunación ($S \to R$) operativiza el umbral $p_c = 1 - 1/R_0$ y `immunity_days` explora ondas endémicas (`[idm2026modelinghub]`). |
-| **Telemetría, ensambles Monte Carlo (`CpuEnsembleEngine`), NGM, ODE RK4, sensibilidad y ABC-SMC** | [include/cpu_engine.hpp](include/cpu_engine.hpp), [src/cpu_engine.cpp](src/cpu_engine.cpp) | Conecta la microsimulación estocástica en GPU con métricas agregadas de vigilancia (`[luque2020como]`, `[cdc2026cfa]`), $R_0$ por NGM (`[vandendriessche2002reproduction]`, `[diekmann2010construction]`), evaluación probabilística (`WIS`, `IS80`, `RMSE`, `MAE`) y calibración bayesiana aproximada ABC-SMC (`[rama2026systematic]`, `[raimundez2021covid]`). |
+| **`AgentState` (`S, E, I, R, D`) and base parameters** (`incubation_days = 5.0f`, `infectious_days = 10.0f`, `fatality_rate = 0.02f`, `dt = 1/48` days) | [include/types.hpp](../include/types.hpp) | Reflects the standard $S \to E \to I \to \{R, D\}$ transition for pathogens with a latent period (`[idm2026modelinghub]`, `[raimundez2021covid]`). Default values match documented magnitudes for SARS-CoV-2 and 1918 influenza: 5–6 day incubation (`[raimundez2021covid]`) and ~2% case fatality (`[luque2020como]`). |
+| **`RiskGroup` stratification** (`RISK_LOW` ~50%, $0.25\times$ fatality; `RISK_MEDIUM` ~35%, $1.0\times$; `RISK_HIGH` ~15%, $3.5\times$ fatality) | [include/types.hpp](../include/types.hpp) | Addresses a core limitation of homogeneous SIR noted in `[luque2020como]`, `[hethcote2000mathematics]`, and `[rama2026systematic]`: mobility and infection fatality ratio ($\text{IFR}_a$) vary sharply across age/risk strata. |
+| **Continuous 2D space, `urban_clustering`, and $O(N)$ *Spatial Hashing* with `cub::DeviceRadixSort::SortPairs`** | [PROJECT_PLAN.md](PROJECT_PLAN.md), [include/types.hpp](../include/types.hpp), [src/cuda_engine.cu](../src/cuda_engine.cu) | Overcomes the unrealistic homogeneous-mixing assumption (`[luque2020como]`, `[arenas2020derivation]`, `[citron2021comparing]`). A uniform grid with `cell_size >= infection_radius` reduces neighbor lookup from $O(N^2)$ to $O(N)$ in SoA (*Structure of Arrays*) memory, with coalescing physical reordering and empty-infected cell skipping (`[sudhi2022scalable]`, `[oshinubi2026systematic]`). |
+| **Tessellated urban layouts (`UrbanZone`), households (`home_id`, `work_zone`), and `infection_source` attribution** | [include/types.hpp](../include/types.hpp), [src/cuda_engine.cu](../src/cuda_engine.cu) | Operationalizes **Lagrangian** home-return mobility (`[citron2021comparing]`, `[arenas2020derivation]`): rectangular 5×5 districts (`PRESET_MONOCENTRIC`, `PRESET_POLYCENTRIC`), day/night and weekly cycles (`dt = 1/48` d), intrahousehold `RiskGroup` mixing, and contagion-setting tracking (`Home, Work, Transit, Hospital, Leisure`). |
+| **Interventions (`quarantine_factor`, `focal_quarantine`, `household_quarantine`, `close_schools_work`, `vaccination_rate`, `immunity_days`) and `hospital_capacity_pct`** | [include/types.hpp](../include/types.hpp), [src/cuda_engine.cu](../src/cuda_engine.cu) | Models global, $Z$-score-targeted ($Z > 2.0$), and household-level NPIs to suppress effective contact $\mu$ and peak $I_{\max}$ relative to healthcare capacity (`[luque2020como]`, `[ferguson2020report9]`, `[markel2007nonpharmaceutical]`). Vaccination ($S \to R$) operationalizes $p_c = 1 - 1/R_0$ and `immunity_days` explores endemic waves (`[idm2026modelinghub]`). |
+| **Telemetry, Monte Carlo ensembles (`CpuEnsembleEngine`), NGM, RK4 ODE, sensitivity, and ABC-SMC** | [include/cpu_engine.hpp](../include/cpu_engine.hpp), [src/cpu_engine.cpp](../src/cpu_engine.cpp) | Connects GPU microsimulation with aggregate surveillance metrics (`[luque2020como]`, `[cdc2026cfa]`), NGM $R_0$ (`[vandendriessche2002reproduction]`, `[diekmann2010construction]`), probabilistic scoring (`WIS`, `IS80`, `RMSE`, `MAE`), and Approximate Bayesian Computation ABC-SMC (`[rama2026systematic]`, `[raimundez2021covid]`). |
 
-### 4.1 Análisis matemático de la telemetría implementada en `CpuTelemetryEngine`
+### 4.1 Mathematical Analysis of Telemetry in `CpuTelemetryEngine`
 
-En [src/cpu_engine.cpp](src/cpu_engine.cpp), `CpuTelemetryEngine::update` calcula cuatro indicadores a partir de las series temporales de `SimStats`:
+In [src/cpu_engine.cpp](../src/cpu_engine.cpp), `CpuTelemetryEngine::update` computes four indicators from `SimStats` time series:
 
-1. **Tasa de incidencia diaria (`new_cases_rate`):** Se calcula directamente a partir del contador atómico exacto de transiciones $S \to E$ en GPU (`stats.new_exposures / elapsed_step`). Al medir el flujo real de nuevas exposiciones en lugar de $\Delta S / \Delta t$, la incidencia permanece exacta incluso cuando se activan simultáneamente vacunación (`vaccination_rate > 0`) o pérdida de inmunidad (`immunity_days > 0`).
-2. **Número reproductivo efectivo ($R_t$) y categorías CDC CFA:** A partir de la ventana móvil de casos activos $A_{\text{act}}(t) = E(t) + I(t)$ con un desfase `lag` (hasta 10 muestras), el motor estima la tasa de crecimiento exponencial instantánea:
+1. **Daily Incidence Rate (`new_cases_rate`):** Computed directly from the exact GPU atomic counter of $S \to E$ transitions (`stats.new_exposures / elapsed_step`). Measuring true new-exposure flux instead of $\Delta S / \Delta t$ keeps incidence exact even when vaccination (`vaccination_rate > 0`) or waning immunity (`immunity_days > 0`) is simultaneously active.
+2. **Effective Reproduction Number ($R_t$) and CDC CFA Categories:** From the sliding window of active cases $A_{\text{act}}(t) = E(t) + I(t)$ with a lag of up to 10 samples, the engine estimates the instantaneous exponential growth rate:
    $$
    r = \frac{\ln\big(E(t) + I(t)\big) - \ln\big(E(t-\Delta t_{\text{lag}}) + I(t-\Delta t_{\text{lag}})\big)}{\Delta t_{\text{lag}}}
    $$
-   y obtiene $R_t = \max\big(0,\; 1 + r \cdot T_g\big)$ con $T_g \approx T_{\text{incub}} + \frac{1}{2} T_{\text{infec}}$ (aproximación de primer orden de Wallinga–Lipsitch / Lotka–Euler). Adicionalmente, mediante *bootstrap* sobre las tasas recientes (y de forma empírica sobre las $K$ réplicas en `CpuEnsembleEngine`), calcula los intervalos `[rt_p05, rt_p95]`, $\mathbb{P}(R_t > 1)$ y asigna la categoría operativa `RtCategory` estándar del CDC CFA `[cdc2026cfa]` (*Declining* $<10\,\%$, *Likely Declining* $<25\,\%$, *Uncertain*, *Likely Growing* $>75\,\%$, *Growing* $>90\,\%$).
-3. **Tasa de letalidad acumulada (`cfr` vs. `ifr`):** El motor distingue explícitamente entre la **CFR** sobre casos resueltos $\text{CFR} = D / (R + D)$ y la **IFR** real sobre el total acumulado de infecciones verdaderas $\text{IFR} = D / \text{cum\_infections\_}$ (acumulado a partir de `new_exposures`, evitando sesgos cuando existe vacunación hacia $R$ o reinfecciones $R \to S$), en línea con las advertencias de `[luque2020como]`, `[raimundez2021covid]` y `[rama2026systematic]`.
-4. **Alerta de brote (`outbreak_alert`):** Se activa cuando `((z_score > 2.0f) || (stats.max_cell_z > 2.0f)) && (rt > 1.0f)`, combinando un criterio estadístico de anomalía temporal o espacial ($> 2\sigma$ sobre la media local) con la condición epidemiológica de expansión sostenida ($R_t > 1$).
+   and obtains $R_t = \max\big(0,\; 1 + r \cdot T_g\big)$ with $T_g \approx T_{\text{incub}} + \frac{1}{2} T_{\text{infec}}$ (first-order Wallinga–Lipsitch / Lotka–Euler approximation). Additionally, via bootstrap resampling over recent rates (and empirically across $K$ replicas in `CpuEnsembleEngine`), it computes `[rt_p05, rt_p95]`, $\mathbb{P}(R_t > 1)$, and assigns the standard CDC CFA `RtCategory` `[cdc2026cfa]` (*Declining* $<10\%$, *Likely Declining* $<25\%$, *Uncertain*, *Likely Growing* $>75\%$, *Growing* $>90\%$).
+3. **Cumulative Fatality Ratios (`cfr` vs. `ifr`):** The engine explicitly separates **CFR** over resolved cases $\text{CFR} = D / (R + D)$ from true **IFR** over cumulative infections $\text{IFR} = D / \text{cum\_infections\_}$ (accumulated from `new_exposures`, avoiding distortion from vaccination into $R$ or reinfections $R \to S$), aligned with `[luque2020como]`, `[raimundez2021covid]`, and `[rama2026systematic]`.
+4. **Outbreak Alert (`outbreak_alert`):** Triggered when `((z_score > 2.0f) || (stats.max_cell_z > 2.0f)) && (rt > 1.0f)`, combining a statistical temporal or spatial anomaly criterion ($> 2\sigma$ above local mean) with sustained epidemic growth ($R_t > 1$).
 
 ---
 
-## 5. Rigurosidad metodológica: calibración, identificabilidad, incertidumbre y verificación
+## 5. Methodological Rigor: Calibration, Identifiability, Uncertainty, and Verification
 
-Para que un simulador epidemiológico paralelo sea científicamente defendible y no un ejercicio puramente ilustrativo, la literatura revisada establece cuatro exigencias metodológicas clave:
+For a parallel epidemiological simulator to be scientifically defensible rather than purely illustrative, the reviewed literature establishes four core methodological requirements:
 
-### 5.1 Identificabilidad práctica y sesgos en datos agregados
-Raimúndez et al. `[raimundez2021covid]` evaluaron distintas variantes del modelo SEIRD frente a series públicas tempranas de Wuhan y demostraron que los conteos agregados de casos infectados, recuperados y fallecidos suelen ser insuficientes para identificar de forma única los parámetros internos del modelo. En particular:
-* Los métodos bayesianos MCMC con *priors* acotados poco informativos produjeron intervalos de credibilidad al $99\,\%$ artificialmente estrechos pero biológicamente implausibles (por ejemplo, periodos de incubación de $[23{,}4,\; 257{,}6]$ días), mientras que el análisis frecuentista mediante **verosimilitud de perfil (*profile likelihood*)** reveló correctamente la amplia no-identificabilidad real.
-* Fijar arbitrariamente condiciones iniciales no observadas (como $E_0$) introduce sesgos severos en las tasas de progresión estimadas `[raimundez2021covid]`.
+### 5.1 Practical Identifiability and Aggregate Data Bias
+Raimúndez et al. `[raimundez2021covid]` evaluated SEIRD model variants against early public Wuhan time series and demonstrated that aggregate counts of infected, recovered, and deceased individuals are often insufficient to uniquely identify internal model parameters. In particular:
+* Bayesian MCMC with weakly informative bounded priors produced artificially narrow 99% credible intervals at biologically implausible values (e.g., incubation periods of $[23.4,\; 257.6]$ days), whereas frequentist **profile likelihood** analysis correctly exposed the underlying non-identifiability.
+* Arbitrarily fixing unobserved initial conditions (such as $E_0$) introduces severe bias into estimated progression rates `[raimundez2021covid]`.
 
-### 5.2 Límites de predictibilidad y efecto de la heterogeneidad
-Estrada `[estrada2020covid]` documenta que, durante la fase de crecimiento exponencial, pequeñas variaciones paramétricas generan una divergencia rápida de los intervalos predictivos posteriores (oscilando entre extinción y crecimiento sostenido), por lo que la predicción cuantitativa de puntos de inflexión y picos solo es confiable en horizontes cortos. Asimismo, Brauer `[brauer2017mathematical]` enfatiza que la variabilidad en la tasa de contactos individuales (superdispersión) altera sustancialmente la probabilidad de extinción temprana y la eficacia del rastreo frente al modelo de mezcla homogénea.
+### 5.2 Predictability Limits and Heterogeneity Effects
+Estrada `[estrada2020covid]` documents that during the exponential growth phase, small parameter variations cause rapid divergence in posterior predictive intervals (spanning from extinction to sustained growth), making quantitative peak and inflection-point forecasts reliable only over short horizons. Likewise, Brauer `[brauer2017mathematical]` emphasizes that individual contact-rate heterogeneity (superspreading) substantially alters early extinction probability and contact-tracing effectiveness compared to homogeneous mixing.
 
-### 5.3 Calibración estocástica, sustitutos híbridos y marcos de decisión
-Rama et al. `[rama2026systematic]` compararon un modelo SEIRD estocástico por edades calibrado mediante **Approximate Bayesian Computation Sequential Monte Carlo (ABC-SMC)** frente a Redes Neuronales Informadas por Física (PINN) calibradas vía MCMC. Sobre datos sintéticos con ruido binomial negativo, el enfoque mecanicista estocástico superó sistemáticamente a las PINN en precisión puntual y cobertura probabilística (MAE, RMSE, WIS, IS80), mientras que las PINN tendieron a producir intervalos excesivamente estrechos (sobreconfiados). A su vez, tanto el marco interagencial OMS/OCDE/Banco Mundial `[who2024integrated]` como el *ModelingHub* del IDM `[idm2026modelinghub]` y el *Modeling Handbook* del CDC CFA `[cdc2026cfa]` coinciden en que la calibración debe ser un flujo iterativo con cuantificación explícita de incertidumbre, ensambles multimodelo y transparencia sobre supuestos estructurales cuando cambian las intervenciones.
+### 5.3 Stochastic Calibration, Hybrid Surrogates, and Decision Frameworks
+Rama et al. `[rama2026systematic]` compared an age-structured stochastic SEIRD model calibrated via **Approximate Bayesian Computation Sequential Monte Carlo (ABC-SMC)** against Physics-Informed Neural Networks (PINNs) calibrated via MCMC. On synthetic data with negative-binomial observation noise, the mechanistic stochastic approach consistently outperformed PINNs in point accuracy and probabilistic coverage (MAE, RMSE, WIS, IS80), whereas PINNs tended to produce overconfident (excessively narrow) intervals. Meanwhile, the WHO/OECD/World Bank interagency framework `[who2024integrated]`, the IDM *ModelingHub* `[idm2026modelinghub]`, and the CDC CFA *Modeling Handbook* `[cdc2026cfa]` all emphasize iterative calibration with explicit uncertainty quantification, multi-model ensembles, and transparency regarding structural assumptions when interventions change.
 
-### 5.4 Verificación, invariantes y validación científica empírica en `seird-Parallel`
-La revisión sistemática de Oshinubi et al. `[oshinubi2026systematic]` sobre 109 estudios espaciales reveló una severa brecha de reproducibilidad: apenas el **30{,}6\,\%** puso su código fuente en acceso abierto. En `seird-Parallel`, la verificación cubre tanto propiedades estructurales como validación cuantitativa frente a la literatura:
+### 5.4 Verification, Invariants, and Empirical Scientific Validation in `seird-Parallel`
+The systematic review of 109 spatial studies by Oshinubi et al. `[oshinubi2026systematic]` revealed a major reproducibility gap: only **30.6%** made their source code openly available. In `seird-Parallel`, verification covers both structural invariants and quantitative validation against published literature:
 
-1. **Suite de invariantes ([tests/test_invariants.cpp](tests/test_invariants.cpp), 12 pruebas):**
-   * **Conservación de masa y telemetría:** Valida paso a paso $S + E + I + R + D = N$ en el modelo base, con intervenciones, en ensambles Monte Carlo (`K = 8`) y en layouts urbanos (`PRESET_MONOCENTRIC`, `household_quarantine`), junto con la finitud numérica de todas las métricas.
-   * **Consistencia de dominio, memoria y reproducibilidad:** Verifica límites dinámicos de VRAM, la invariante geométrica `cell_size >= infection_radius` y reproducibilidad bit a bit ante la misma semilla.
-   * **Validación analítica, sensibilidad y ABC-SMC:** Verifica la convergencia ABM vs. ODE RK4 en el límite de alta difusión, $R_0(\text{NGM})$ sobre los 3 estratos `RiskGroup` (`[vandendriessche2002reproduction]`, `[diekmann2010construction]`), métricas probabilísticas (`WIS`, `IS80`, `RMSE`, `MAE`, coberturas), barridos de sensibilidad global (`run_global_sensitivity_sweep`) y calibración estocástica (`calibrate_abc_smc`, `[rama2026systematic]`).
+1. **Invariant Suite ([tests/test_invariants.cpp](../tests/test_invariants.cpp), 12 tests):**
+   * **Mass Conservation and Telemetry:** Validates step-by-step $S + E + I + R + D = N$ in the baseline model, under interventions, in Monte Carlo ensembles (`K = 8`), and in urban layouts (`PRESET_MONOCENTRIC`, `household_quarantine`), along with numerical finiteness of all metrics.
+   * **Domain, Memory, and Reproducibility Consistency:** Verifies dynamic VRAM limits, the geometric invariant `cell_size >= infection_radius`, and bit-identical reproducibility for a given seed.
+   * **Analytical Validation, Sensitivity, and ABC-SMC:** Verifies ABM vs. RK4 ODE convergence in the high-diffusion limit, $R_0(\text{NGM})$ across the 3 `RiskGroup` strata (`[vandendriessche2002reproduction]`, `[diekmann2010construction]`), probabilistic scores (`WIS`, `IS80`, `RMSE`, `MAE`, coverages), global sensitivity sweeps (`run_global_sensitivity_sweep`), and stochastic calibration (`calibrate_abc_smc`, `[rama2026systematic]`).
 
-2. **Suite de benchmarks científicos ([tests/test_scientific_benchmarks.cpp](tests/test_scientific_benchmarks.cpp), 8 experimentos):**
-   * **Umbrales analíticos (`[kermack1927contribution]`, `[luque2020como]`):** Para $R_0 \in \{1{,}5,\; 2{,}5,\; 10{,}0\}$, el solver RK4 con *sub-stepping* adaptativo reproduce la tasa de ataque final y $I_{\text{máx}}/N$ (error de `1.44e-5` en $R_0=2{,}5$ y `4.54e-9` en $R_0=10{,}0$) y confirma la contención exacta en el umbral de inmunidad de grupo $p_c = 1 - 1/R_0$.
-   * **Invariancia del periodo latente (`[idm2026modelinghub]`):** Comparando SIR vs. SEIR ($T_{\text{incub}} = 5\text{ d}$, $R_0 = 2{,}5$), el compartimento $E$ retrasa el pico del día `53.5` al `98.7` y lo reduce de `23.35 %` a `15.38 %`, manteniendo inalterado el ataque final (`0.8927`, diferencia `4.03e-5`).
-   * **NPIs de la gripe de 1918 (`[markel2007nonpharmaceutical]`):** En GPU ABM (`N = 20 000`), la aplicación temprana y sostenida de NPIs reduce el pico de `27.52 %` a `2.04 %` y la mortalidad de `4.12 %` a `0.40 %`, mientras que el levantamiento prematuro al día 25 provoca un **segundo pico infeccioso** (`24.68 %`).
-   * **Ondas endémicas (`[hethcote2000mathematics]`):** Con pérdida de inmunidad ($T_{\text{inm}} = 35\text{ d}$, $R_0 = 2{,}8$), el sistema SEIRDS exhibe ondas amortiguadas y converge a un equilibrio endémico (`9.97 %`).
-   * **Extinción estocástica temprana y superdispersión (`[brauer2017mathematical]`, `[estrada2020covid]`):** Con $I_0 = 3$ y $R_0 > 1$ (`K = 32`), el escenario homogéneo presenta `53.1 %` de extinción temprana frente a `78.1 %` con superdispersores (`10 % × 6`).
-   * **Estructura urbana (`[citron2021comparing]`):** Bajo parámetros idénticos, la ciudad policéntrica reduce y retrasa el pico respecto a la monocéntrica (`39.43 %` en día `33.0` vs. `46.91 %` en día `29.0`).
-   * **Identificabilidad práctica (`[raimundez2021covid]`):** `calibrate_abc_smc` recupera $\beta$ con precisión en 1 parámetro (`0.259` vs. `0.280`), mientras que en 3 parámetros simultáneos muestra compensación paramétrica (`0.353 [0.213–0.474]`) con menor `WIS` (`0.0050`).
+2. **Scientific Benchmark Suite ([tests/test_scientific_benchmarks.cpp](../tests/test_scientific_benchmarks.cpp), 8 experiments):**
+   * **Analytical Thresholds (`[kermack1927contribution]`, `[luque2020como]`):** For $R_0 \in \{1.5,\; 2.5,\; 10.0\}$, the adaptive sub-stepping RK4 solver reproduces the final attack rate and $I_{\max}/N$ (error `1.44e-5` at $R_0=2.5$ and `4.54e-9` at $R_0=10.0$) and confirms exact containment at the herd immunity threshold $p_c = 1 - 1/R_0$.
+   * **Latent Period Invariance (`[idm2026modelinghub]`):** Comparing SIR vs. SEIR ($T_{\text{incub}} = 5\text{ d}$, $R_0 = 2.5$), compartment $E$ delays the peak from day `53.5` to `98.7` and lowers it from `23.35%` to `15.38%`, while leaving the final attack rate unchanged (`0.8927`, difference `4.03e-5`).
+   * **1918 Influenza NPIs (`[markel2007nonpharmaceutical]`):** On GPU ABM (`N = 20,000`), early sustained NPIs reduce peak infection from `27.52%` to `2.04%` and mortality from `4.12%` to `0.40%`, whereas lifting restrictions prematurely at day 25 triggers a **second infectious peak** (`24.68%`).
+   * **Endemic Waves (`[hethcote2000mathematics]`):** With waning immunity ($T_{\text{imm}} = 35\text{ d}$, $R_0 = 2.8$), the SEIRDS system exhibits damped oscillations converging to an endemic equilibrium (`9.97%`).
+   * **Early Stochastic Extinction & Superspreading (`[brauer2017mathematical]`, `[estrada2020covid]`):** With $I_0 = 3$ and $R_0 > 1$ (`K = 32`), homogeneous mixing yields `53.1%` early extinction versus `78.1%` with superspreaders (`10% × 6`).
+   * **Urban Topology (`[citron2021comparing]`):** Under identical parameters, the polycentric city lowers and delays the peak compared to the monocentric city (`39.43%` at day `33.0` vs. `46.91%` at day `29.0`).
+   * **Practical Identifiability (`[raimundez2021covid]`):** `calibrate_abc_smc` accurately recovers $\beta$ in 1-parameter estimation (`0.259` vs. `0.280`), whereas joint 3-parameter estimation exhibits parameter compensation (`0.353 [0.213–0.474]`) with lower `WIS` (`0.0050`).
 
 ---
 
-## 6. Referencias bibliográficas
+## 6. Bibliographic References
 
 1. `[kermack1927contribution]` Kermack, W. O., & McKendrick, A. G. (1927). A contribution to the mathematical theory of epidemics. *Proceedings of the Royal Society of London. Series A*, 115(772), 700–721. DOI: [10.1098/rspa.1927.0118](https://doi.org/10.1098/rspa.1927.0118).
 2. `[anderson1991infectious]` Anderson, R. M., & May, R. M. (1991). *Infectious Diseases of Humans: Dynamics and Control*. Oxford University Press. ISBN: `978-0-19-854040-3`.
@@ -213,7 +213,7 @@ La revisión sistemática de Oshinubi et al. `[oshinubi2026systematic]` sobre 10
 9. `[brauer2017mathematical]` Brauer, F. (2017). Mathematical epidemiology: Past, present, and future. *Infectious Disease Modelling*, 2(2), 113–127. DOI: [10.1016/j.idm.2017.02.001](https://doi.org/10.1016/j.idm.2017.02.001) · [PMC6001967](https://pmc.ncbi.nlm.nih.gov/articles/PMC6001967/).
 10. `[ferguson2020report9]` Imperial College COVID-19 Response Team (Ferguson, N. M., et al.) (2020). *Report 9: Impact of non-pharmaceutical interventions (NPIs) to reduce COVID-19 mortality and healthcare demand*. Imperial College London. DOI: [10.25561/77482](https://doi.org/10.25561/77482).
 11. `[arenas2020derivation]` Arenas, A., et al. (2020). Derivation of the effective reproduction number R for COVID-19 in relation to mobility restrictions and confinement. *medRxiv* 2020.04.06.20054320. DOI: [10.1101/2020.04.06.20054320](https://doi.org/10.1101/2020.04.06.20054320).
-12. `[luque2020como]` Luque, B., Ballesteros, F., & Miramontes, O. (2020). Cómo modelizar una pandemia. *Investigación y Ciencia*, mayo de 2020, 52–60.
+12. `[luque2020como]` Luque, B., Ballesteros, F., & Miramontes, O. (2020). Cómo modelizar una pandemia. *Investigación y Ciencia*, May 2020, 52–60.
 13. `[estrada2020covid]` Estrada, E. (2020). COVID-19 and SARS-CoV-2. Modeling the present, looking at the future. *Physics Reports*, 869, 1–51. DOI: [10.1016/j.physrep.2020.07.005](https://doi.org/10.1016/j.physrep.2020.07.005) · [PMC7386394](https://pmc.ncbi.nlm.nih.gov/articles/PMC7386394/).
 14. `[raimundez2021covid]` Raimúndez, E., Dudkin, E., Vanhoefer, J., Alamoudi, E., Merkt, S., Fuhrmann, L., Bai, F., & Hasenauer, J. (2021). COVID-19 outbreak in Wuhan demonstrates the limitations of publicly available case numbers for epidemiological modeling. *Epidemics*, 34, 100439. DOI: [10.1016/j.epidem.2021.100439](https://doi.org/10.1016/j.epidem.2021.100439) · [PMC7845523](https://pmc.ncbi.nlm.nih.gov/articles/PMC7845523/).
 15. `[citron2021comparing]` Citron, D. T., Guerra, C. A., Dolgert, A. J., Wu, S. L., Henry, J. M., Sánchez C., H. M., & Smith, D. L. (2021). Comparing metapopulation dynamics of infectious diseases under different models of human movement. *Proceedings of the National Academy of Sciences (PNAS)*, 118(18), e2007488118. DOI: [10.1073/pnas.2007488118](https://doi.org/10.1073/pnas.2007488118) · [PMC8106338](https://pmc.ncbi.nlm.nih.gov/articles/PMC8106338/).

@@ -8,7 +8,7 @@
 [![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C?style=flat-square&logo=cmake)](https://cmake.org/)
 [![OpenGL](https://img.shields.io/badge/OpenGL-Win32-5586A4?style=flat-square&logo=opengl)](https://www.opengl.org/)
 
-**Hybrid GPU-accelerated stochastic Agent-Based Model (ABM SEIRD) epidemiological simulation engine in SoA memory (NVIDIA CUDA) with parallel CPU analytics (OpenMP/AVX2), Monte Carlo ensembles, and native 1080p visualization (Win32 + OpenGL).**
+**Stochastic ABM SEIRD simulator in C++17 (OpenMP/AVX2) and NVIDIA CUDA (spatial hashing, urban mobility, Monte Carlo ensembles) with RK4/NGM validation, ABC-SMC calibration, and native 1080p Win32/OpenGL visualization.**
 
 [Features](#features) • [Architecture](#hybrid-processing-architecture) • [Metrics & Benchmarks](#performance-metrics--benchmarks) • [Structure](#repository-structure) • [Requirements](#system-requirements--dependencies) • [Quickstart](#quickstart) • [Tests](#validation--test-suite) • [Documentation](#documentation--theoretical-framework)
 
@@ -91,7 +91,7 @@ A 30-day headless run (`N = 250,000` agents, `I0 = 150`, `dt = 1/24` day, `720` 
 * `include/`: C++17 / CUDA headers (`types.hpp`, `cuda_engine.cuh`, `cpu_engine.hpp`).
 * `src/`: CUDA/OpenMP engine implementations and native Win32/OpenGL UI (`cuda_engine.cu`, `cpu_engine.cpp`, `main.cpp`).
 * `tests/`: Automated invariant suite (`test_invariants.cpp`) and scientific validation benchmarks (`test_scientific_benchmarks.cpp`).
-* `docs/`: Architecture plan, theoretical framework, and bibliography (`PROJECT_PLAN.md`, `MARCO_TEORICO.md`, `referencias.bib`).
+* `docs/`: Technical documentation (`ARCHITECTURE.md`, `API_REFERENCE.md`, `USER_GUIDE.md`), architecture plan (`PROJECT_PLAN.md`), theoretical framework (`MARCO_TEORICO.md`), and bibliography (`referencias.bib`).
 * `web/`: Auxiliary web resources (`index.html`, `app.js`, `style.css`).
 * `CMakeLists.txt` & `build.bat`: CMake ($\ge 3.20$) build configuration and quick Windows build script (MSVC + `nvcc`).
 
@@ -174,6 +174,9 @@ Verified invariant tests (`12/12` passing):
 
 ## Documentation & Theoretical Framework
 
+* **Technical Architecture (GPU SoA, CUDA Pipeline, OpenMP & UI):** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+* **C++17 / CUDA API Reference:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md)
+* **User & Developer Guide (Build, Controls, Exports & Tests):** [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
 * **Architecture Plan & Technical Log:** [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)
 * **Theoretical Framework & Mathematical Formulation:** [`docs/MARCO_TEORICO.md`](docs/MARCO_TEORICO.md)
 * **Bibliography (BibTeX):** [`docs/referencias.bib`](docs/referencias.bib)
